@@ -44,6 +44,9 @@ static __device__ __forceinline__ void patched_stcs(float *addr, float val) {
 static __device__ __forceinline__ void patched_stcs(hip_bfloat16 *addr, hip_bfloat16 val) {
     *addr = val;
 }
+static __device__ __forceinline__ void patched_stcs(__hip_bfloat16 *addr, __hip_bfloat16 val) {
+    *addr = val;
+}
 static __device__ __forceinline__ void patched_stcs(int4 *addr, int4 val) {
     int *a = (int *)addr;
     __builtin_nontemporal_store(val.x, a);
@@ -62,6 +65,9 @@ static __device__ __forceinline__ int4 patched_ldcs(const int4 *addr) {
         __builtin_nontemporal_load(a+3));
 }
 static __device__ __forceinline__ hip_bfloat16 patched_ldcs(const hip_bfloat16 *addr) {
+    return *addr;
+}
+static __device__ __forceinline__ __hip_bfloat16 patched_ldcs(const __hip_bfloat16 *addr) {
     return *addr;
 }
 

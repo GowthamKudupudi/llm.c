@@ -71,6 +71,8 @@ HIPCC_FLAGS = -O3 -march=native -I$(BUILD_DIR)/hip -fno-strict-aliasing
 HIPCC_LDFLAGS += -lamdhip64 -lhipblaslt
 ifneq ($(filter gfx1100,$(AMDGPU_TARGETS)),)
   AMDGPU_TARGETS := gfx1100
+else ifneq ($(filter gfx1101,$(AMDGPU_TARGETS)),)
+  AMDGPU_TARGETS := gfx1101
 else ifneq ($(filter gfx906,$(AMDGPU_TARGETS)),)
   WAVEFRONTSIZE64 ?= 1
   AMDGPU_TARGETS := gfx906
@@ -84,7 +86,7 @@ else
   $(warning Did not find a supported AMD device. Rebuild with AMDGPU_TARGETS env variable to force build for device)
 endif
 ifndef MULTI_GPU # use MULTI_GPU to force a multi-gpu build in a cross compile situation
-  ifeq ($(shell test `$(ROCM_PATH)/llvm/bin/amdgpu-offload-arch -a | grep $(AMDGPU_TARGETS) | wc -l` -lt 2; echo $$?),0)
+  ifeq ($(shell test `$(ROCM_PATH)/llvm/bin/amdgpu-arch | grep $(AMDGPU_TARGETS) | wc -l` -lt 2; echo $$?),0)
     NO_MULTI_GPU ?= 1
   endif
 endif
