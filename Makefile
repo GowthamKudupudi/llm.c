@@ -359,7 +359,7 @@ $(BUILD_DIR)/hip/%.cu: %.cu
 	$(HIPIFY) -quiet-warnings $< -o $@
 
 %amd: $(BUILD_DIR)/hip/%.cu amd_headers
-	$(HIPCC) $(HIPCC_FLAGS) $(PFLAGS) $< $(HIPCC_LDFLAGS) -o $@
+	$(HIPCC) $(HIPCC_FLAGS) $(U_HIPCC_FLAGS) $(PFLAGS) $< $(HIPCC_LDFLAGS) -o $@
 
 profile_gpt2amd: $(BUILD_DIR)/hip/profile_gpt2.cu $(BUILD_DIR)/hip/train_gpt2.cu amd_headers
 	$(HIPCC) $(HIPCC_FLAGS) $(PFLAGS) $< $(HIPCC_LDFLAGS) -o $@
