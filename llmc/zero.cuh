@@ -12,7 +12,11 @@ Utilities for ZeRO sharding
 #include <stddef.h>
 
 #ifdef MULTI_GPU
+#ifdef BUILD_AMD
+#include <rccl/rccl.h>
+#else
 #include <nccl.h>
+#endif
 #ifdef USE_MPI
 #include <mpi.h>
 #endif
@@ -449,7 +453,11 @@ MultiGpuConfig multi_gpu_config_init(int num_processes, int process_rank, int gp
     ncclCheck(ncclCommInitRank(&result.nccl_comm, result.num_processes, nccl_id, result.process_rank));
     cudaCheck(cudaStreamCreate(&result.nccl_stream));
     // event without timing for maximum performance
+#ifdef BUILD_AMD
+    cudaCheck(cudaEventCreateWithFlags(&result.compute_nccl_sync, cudaEventDisableTiming));
+#else
     cudaCheck(cudaEventCreate(&result.compute_nccl_sync, cudaEventDisableTiming));
+#endif
     nvtxNameCudaStreamA(result.nccl_stream, "nccl stream");
     nvtxNameCudaEventA(result.compute_nccl_sync, "nccl compute sync");
     cudaCheck(cudaMallocManaged(&result.unified_buffer, sizeof(float)));

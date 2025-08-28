@@ -44,6 +44,10 @@ static const PerfData AMPERE_DATACENTER = {156.f, 312.f, 312.f, 312.f, -1.f, -1.
 static const PerfData AMPERE_CONSUMER = {40.f, 80.f, 80.f, 160.f, -1.f, -1.f, 1860.f, 336.f};
 static const PerfData HOPPER = {378.f, 756.f, 756.f, 756.f, 1513.f, 1513.f, 1620.f, 456.f};
 static const PerfData ADA = {82.6f, 165.2f, 165.2f, 330.3f, 330.3f, 660.6f, 2520.f, 512.f};
+static const PerfData RDNA3 = {61.42f, 122.8f, 122.8f, -1.f, -1.f, -1.f, 2500.f, 384.f};
+static const PerfData CDNA2 = {95.7f, 383.0f, 383.0f, -1.f, -1.f, -1.f, 1690.f, 208.f};
+static const PerfData CDNA3 = {122.6f, 980.6f, 980.6f, -1.f, -1.f, -1.f, 2100.f, 228.f};
+static const PerfData GCN5 = {10.75f, 10.75f, 21.5f, -1.f, -1.f, -1.f, 1750.f, 60.f};
 
 typedef struct {
     const char* name;
@@ -92,6 +96,11 @@ static GPUEntry gpu_db[] = {
     {"NVIDIA GeForce RTX 4060", &ADA, 96, 2460},
     {"NVIDIA H100 PCIe", &HOPPER, 456, 1620},
     {"NVIDIA H100 80GB HBM3", &HOPPER, 528, 1830}, // HBM3 = SXM5
+    {"Radeon RX 7900 XTX", &RDNA3, 384, 2500},
+    {"AMD Instinct MI250X/MI250", &CDNA2, 208, 1690},
+    {"AMD Instinct MI300A", &CDNA3, 228, 2100},
+    {"AMD Instinct MI300X", &CDNA3, 304, 2100},
+    {"AMD Radeon VII", &GCN5, 60, 1750},
 };
 
 float get_flops_promised(const char* device, int precision_mode) {

@@ -62,6 +62,58 @@ ifneq ($(GPU_COMPUTE_CAPABILITY),)
   NVCC_FLAGS += --generate-code arch=compute_$(GPU_COMPUTE_CAPABILITY),code=[compute_$(GPU_COMPUTE_CAPABILITY),sm_$(GPU_COMPUTE_CAPABILITY)]
 endif
 
+# AMD flags
+ROCM_PATH ?= /opt/rocm
+AMDGPU_TARGETS ?= $(shell $(ROCM_PATH)/llvm/bin/amdgpu-arch)
+HIPCC := $(shell which hipcc 2>/dev/null)
+HIPIFY := $(shell which hipify-perl 2>/dev/null)
+HIPCC_FLAGS = -O3 -march=native -I$(BUILD_DIR)/hip -fno-strict-aliasing
+HIPCC_LDFLAGS += -lamdhip64 -lhipblaslt
+ifneq ($(filter gfx1100,$(AMDGPU_TARGETS)),)
+  AMDGPU_TARGETS := gfx1100
+else ifneq ($(filter gfx1101,$(AMDGPU_TARGETS)),)
+  AMDGPU_TARGETS := gfx1101
+else ifneq ($(filter gfx906,$(AMDGPU_TARGETS)),)
+  WAVEFRONTSIZE64 ?= 1
+  AMDGPU_TARGETS := gfx906
+else ifneq ($(filter gfx90a,$(AMDGPU_TARGETS)),)
+  WAVEFRONTSIZE64 ?= 1
+  AMDGPU_TARGETS := gfx90a
+else ifneq ($(filter gfx942,$(AMDGPU_TARGETS)),)
+  WAVEFRONTSIZE64 ?= 1
+  AMDGPU_TARGETS := gfx942
+else
+  $(warning Did not find a supported AMD device. Rebuild with AMDGPU_TARGETS env variable to force build for device)
+endif
+ifndef MULTI_GPU # use MULTI_GPU to force a multi-gpu build in a cross compile situation
+  ifeq ($(shell test `$(ROCM_PATH)/llvm/bin/amdgpu-arch | grep $(AMDGPU_TARGETS) | wc -l` -lt 2; echo $$?),0)
+    NO_MULTI_GPU ?= 1
+  endif
+endif
+HIPCC_FLAGS += $(addprefix --offload-arch=,$(AMDGPU_TARGETS))
+ifneq ($(NO_MULTI_GPU), 1)
+  ifdef RCCL_PATH
+    HIPCC_FLAGS += -I$(RCCL_PATH)/include
+    HIPCC_LDFLAGS += -L$(RCCL_PATH)
+  endif
+  ifeq ($(shell [ -d /usr/lib/x86_64-linux-gnu/openmpi/lib/ ] && [ -d /usr/lib/x86_64-linux-gnu/openmpi/include/ ] && echo "exists"), exists)
+    HIPCC_FLAGS += -I/usr/lib/x86_64-linux-gnu/openmpi/include -DMULTI_GPU -DUSE_MPI
+    HIPCC_LDFLAGS += -L/usr/lib/x86_64-linux-gnu/openmpi/lib/ -lmpi -lrccl
+  endif
+endif
+ifdef HIPBLASLT_PATH
+  HIPCC_FLAGS += -I$(HIPBLASLT_PATH)/include
+  HIPCC_LDFLAGS += -L$(HIPBLASLT_PATH)/lib
+endif
+ifdef HIPBLAS_PATH
+  HIPCC_FLAGS += -I$(HIPBLAS_PATH)/include
+  HIPCC_LDFLAGS += -L$(HIPBLAS_PATH)/lib
+endif
+ifdef WAVEFRONTSIZE64
+  HIPCC_FLAGS += -DWAVEFRONTSIZE64 -mwavefrontsize64
+endif
+AMD_HEADERS = $(addprefix $(BUILD_DIR)/hip/,$(wildcard llmc/*h))
+
 # autodect a lot of various supports on current platform
 $(info ---------------------------------------------)
 
@@ -262,6 +314,15 @@ else
     TARGETS += train_gpt2cu test_gpt2cu train_gpt2fp32cu test_gpt2fp32cu $(NVCC_CUDNN)
 endif
 
+# Conditional inclusion of AMD targets
+ifeq ($(HIPCC),)
+    $(info ✗ hipcc not found, skipping GPU/AMD builds)
+else
+    $(info ✓ hipcc found, building for $(AMDGPU_TARGETS))
+    TARGETS += train_gpt2amd test_gpt2amd train_gpt2_fp32amd test_gpt2_fp32amd profile_gpt2amd
+    HIPCC_FLAGS += -DBUILD_AMD
+endif
+
 $(info ---------------------------------------------)
 
 all: $(TARGETS)
@@ -293,6 +354,28 @@ profile_gpt2cu: profile_gpt2.cu $(NVCC_CUDNN)
 train_llama3cu: train_llama3.cu $(NVCC_CUDNN)
 	$(NVCC) $(NVCC_FLAGS) $(PFLAGS) $^ $(NVCC_LDFLAGS) $(NVCC_INCLUDES) $(NVCC_LDLIBS) $(CUDA_OUTPUT_FILE)
 
+### AMD builds:
+
+$(BUILD_DIR)/hip/llmc/%h: llmc/%h
+	@mkdir -p $(dir $@)
+	$(HIPIFY) -quiet-warnings $< -o $@
+
+amd_headers: $(AMD_HEADERS)
+
+$(BUILD_DIR)/hip/%.cu: %.cu
+	@mkdir -p $(dir $@)
+	$(HIPIFY) -quiet-warnings $< -o $@
+
+%amd: $(BUILD_DIR)/hip/%.cu amd_headers
+	$(HIPCC) $(HIPCC_FLAGS) $(U_HIPCC_FLAGS) $(PFLAGS) $< $(HIPCC_LDFLAGS) -o $@
+
+profile_gpt2amd: $(BUILD_DIR)/hip/profile_gpt2.cu $(BUILD_DIR)/hip/train_gpt2.cu amd_headers
+	$(HIPCC) $(HIPCC_FLAGS) $(PFLAGS) $< $(HIPCC_LDFLAGS) -o $@
+
+test_gpt2amd: $(BUILD_DIR)/hip/test_gpt2.cu $(BUILD_DIR)/hip/train_gpt2.cu amd_headers
+	$(HIPCC) $(HIPCC_FLAGS) $(PFLAGS) $< $(HIPCC_LDFLAGS) -o $@
+
 clean:
 	$(REMOVE_FILES) $(TARGETS)
 	$(REMOVE_BUILD_OBJECT_FILES)
+	rm -rf $(BUILD_DIR)/hip

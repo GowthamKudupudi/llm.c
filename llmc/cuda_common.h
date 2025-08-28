@@ -9,12 +9,16 @@ Common utilities for CUDA code.
 #include <math.h>
 #include <string>
 #include <type_traits>      // std::bool_constant
+#ifdef BUILD_AMD
+#include "llmc/amd_common.cuh"
+#else
 #include <cuda_runtime.h>
 #include <nvtx3/nvToolsExt.h>
 #include <nvtx3/nvToolsExtCudaRt.h>
 #include <cuda_profiler_api.h>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
+#endif
 
 #include "utils.h"
 
@@ -28,7 +32,11 @@ extern cudaDeviceProp deviceProp;
 
 // WarpSize is not a compile time constant
 // Defining here like this possibly allows the compiler to optimize better
+#ifdef WAVEFRONTSIZE64
+#define WARP_SIZE 64U
+#else
 #define WARP_SIZE 32U
+#endif
 
 // try to make sure that 2 blocks fit on A100/H100 to maximise latency tolerance
 // this needs to be defines rather than queried to be used for __launch_bounds__

@@ -20,11 +20,15 @@ the layernorms are connected to the residuals so we += in layernorm backward.
 #include <string.h>
 #include <unistd.h>
 
+#ifdef BUILD_AMD
+#include "amd_support.h"
+#else
 // GPU / CUDA related
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
 #include <cooperative_groups.h>
 #include <cooperative_groups/reduce.h>
+#endif
 // our own utilities
 // defines: fopenCheck, freadCheck, fcloseCheck, fseekCheck, mallocCheck
 #include "llmc/utils.h"
@@ -1057,6 +1061,11 @@ float* malloc_and_point(float** targets[], const size_t* act_sizes, int n) {
     }
     float* acts_memory;
     cudaCheck(cudaMalloc((void**)&acts_memory, num_activations * sizeof(float)));
+#ifdef BUILD_AMD
+    // due to differences in cross lane warp operations on AMD, easiest way to make it work
+    // without bigger changes to kernels is to simply to zero the memory on init
+    cudaCheck(cudaMemset(acts_memory, 0, num_activations * sizeof(float)));
+#endif
     float* acts_memory_iterator = acts_memory;
     for (size_t i = 0; i < n; i++) {
         *(targets[i]) = acts_memory_iterator;

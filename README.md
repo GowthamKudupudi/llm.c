@@ -1,6 +1,35 @@
+# llm.c for AMD devices
+This is a fork of [Andrej Karpathy's llm.c](https://github.com/karpathy/llm.c) with support for AMD devices.
+
+It has been tested on Radeon VII (aka gfx906), MI250X (aka gfx90a), and 7900 XTX (aka gfx1100).
+
+## Performance
+
+~200000 tok/s for the smallest GPT2 model on a 4x7900 XTX.
+
+This is approximately on par with PyTorch 2.4.0 *without* flash attention but using all other go fast options like compile (I'm not aware of any publicly available implementation of flash attention for RDNA3), however PyTorch 2.4.0 with all options to go fast (bf16, flash attention, compile etc) is running at about ~245,000 tok/s.
+
+## Quick Start (AMD targets)
+
+Install ROCm 6.2, checkout the repo, and perform the following steps:
+
+```
+pip install -r requirements.txt
+python dev/data/tinyshakespeare.py
+python train_gpt2.py
+make train_gpt2amd
+./train_gpt2amd
+```
+
+The Makefile will build for gfx1100 or gfx90a (whichever is found first), but if you are attempting to cross compile or have mixed devices in your machine, please use AMDGPU_TARGETS flag with make, e.g.: make train_gpt2amd AMDGPU_TARGETS=gfx1100.
+
+---
+[ORIGINAL README]
+---
+
 # llm.c
 
-LLMs in simple, pure C/CUDA with no need for 245MB of PyTorch or 107MB of cPython. Current focus is on pretraining, in particular reproducing the [GPT-2](https://github.com/openai/gpt-2) and [GPT-3](https://arxiv.org/abs/2005.14165) miniseries, along with a parallel PyTorch reference implementation in [train_gpt2.py](train_gpt2.py). You'll recognize this file as a slightly tweaked [nanoGPT](https://github.com/karpathy/nanoGPT), an earlier project of mine. Currently, llm.c is a bit faster than PyTorch Nightly (by about 7%). In addition to the bleeding edge mainline code in [train_gpt2.cu](train_gpt2.cu), we have a simple reference CPU fp32 implementation in ~1,000 lines of clean code in one file [train_gpt2.c](train_gpt2.c). I'd like this repo to only maintain C and CUDA code. Ports to other languages or repos are very welcome, but should be done in separate repos, and I am happy to link to them below in the "notable forks" section. Developer coordination happens in the [Discussions](https://github.com/karpathy/llm.c/discussions) and on Discord, either the `#llmc` channel on the [Zero to Hero](https://discord.gg/3zy8kqD9Cp) channel, or on `#llmdotc` on CUDA MODE Discord.
+LLMs in simple, pure C/CUDA with no need for 245MB of PyTorch or 107MB of cPython. Current focus is on pretraining, in particular reproducing the [GPT-2](https://github.com/openai/gpt-2) and [GPT-3](https://arxiv.org/abs/2005.14165) miniseries, along with a parallel PyTorch reference implementation in [train_gpt2.py](train_gpt2.py). You'll recognize this file as a slightly tweaked [nanoGPT](https://github.com/karpathy/nanoGPT), an earlier project of mine. Currently, llm.c is a bit faster than PyTorch Nightly (by about 7%). In addition to the bleeding edge mainline code in [train_gpt2.cu](train_gpt2.cu), we have a simple reference CPU fp32 implementation in ~1,000 lines of clean code in one file [train_gpt2.c](train_gpt2.c). I'd like this repo to only maintain C and CUDA code. Ports to other languages or repos are very welcome, but should be done in separate repos, and I am happy to link to them below in the "notable forks" section. Developer coordination happens in the [Discussions](https://github.com/karpathy/llm.c/discussions) and on Discord, either the `#llmc` channel on the [Zero to Hero](https://discord.gg/3zy8kqD9Cp) channel, or on `#llmdotc` on [GPU MODE](https://discord.gg/gpumode) Discord.
 
 ## quick start
 
@@ -211,7 +240,7 @@ Lastly, I will be a lot more sensitive to complexity in the root folder of the p
 
 - CUDA C++
   - [llm.cpp](https://github.com/gevtushenko/llm.c) by @[gevtushenko](https://github.com/gevtushenko): a port of this project using the [CUDA C++ Core Libraries](https://github.com/NVIDIA/cccl)
-     - A presentation this fork was covered in [this lecture](https://www.youtube.com/watch?v=WiB_3Csfj_Q) in the [CUDA MODE Discord Server](https://discord.gg/cudamode)
+     - A presentation this fork was covered in [this lecture](https://www.youtube.com/watch?v=WiB_3Csfj_Q) in the [GPU MODE Discord Server](https://discord.gg/cudamode)
 
 - C++/CUDA
   - [llm.cpp](https://github.com/zhangpiu/llm.cpp/tree/master/llmcpp) by @[zhangpiu](https://github.com/zhangpiu): a port of this project using the [Eigen](https://gitlab.com/libeigen/eigen), supporting CPU/CUDA.

@@ -7,8 +7,10 @@ cuBLAS related utils
 #include <stddef.h>
 #include <stdlib.h>
 #include <stdio.h>
+#ifndef BUILD_AMD
 #include <cublas_v2.h>
 #include <cublasLt.h>
+#endif
 
 // ----------------------------------------------------------------------------
 // cuBLAS Precision settings

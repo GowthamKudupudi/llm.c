@@ -196,11 +196,11 @@ void matmul_cublaslt(floatX* d, const floatX* a, const floatX* b, const floatX* 
         cublasCheck(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_BIAS_DATA_TYPE, &bias_data_type, sizeof(bias_data_type)));
         cublasCheck(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_BIAS_POINTER, &bias, sizeof(bias)));
     }
-
+#ifndef BUILD_AMD
     // set scale type to FP32 (needs to be FP16 if and only if using CUBLAS_COMPUTE_16F, so it's FP32 even for FP8!)
     cublasDataType_t scale_type = CUDA_R_32F;
     cublasCheck(cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_SCALE_TYPE, &scale_type, sizeof(scale_type)));
-
+#endif
     // find a suitable algorithm (cached internally so shouldn't take much CPU time in practice)
     cublasLtMatmulAlgoGetHeuristic(cublaslt_handle, operationDesc, ALayout, BLayout, CLayout, DLayout,
                                    preference, 1, &heuristic, &returnedResults);
@@ -255,7 +255,7 @@ void matmul_backward(floatX* dinp, floatX* dweight, floatX* dbias,
 
         const int block_size = deviceProp.maxThreadsPerMultiProcessor == 1536 ? 768 : 1024;
 
-        dim3 block_dim = {4, 8, (unsigned)block_size/WARP_SIZE};
+        dim3 block_dim = {4, WARP_SIZE/4, (unsigned)block_size/WARP_SIZE};
         const int OC_per_warp = block_dim.y * x128::size; // 64 at BF16
         const int grid_size_x = CEIL_DIV(OC, OC_per_warp); // e.g. 12 horizontal blocks for 768 OCs at BF16
         const int grid_size_y = max(1, deviceProp.maxThreadsPerMultiProcessor * deviceProp.multiProcessorCount / (block_size * grid_size_x)); // full GPU!
