@@ -122,7 +122,7 @@ def precompute_freqs_cis(
         freqs = apply_scaling(freqs)
     freqs = torch.outer(t, freqs)
     freqs_cis = torch.polar(torch.ones_like(freqs), freqs)  # complex64
-    return freqs_cis
+    return torch.view_as_real(freqs_cis)
 
 # -----------------------------------------------------------------------------
 # LLaMA building blocks
@@ -242,14 +242,15 @@ class Block(nn.Module):
 
 @dataclass
 class LlamaConfig:
-    version: str = "3.1"
+    version: str
+    n_layer: int
+    n_head: int
+    n_embd: int
+    ffn_dim_multiplier: float
+    tied_embeddings: bool
     block_size: int = 8192
     vocab_size: int = 128256
-    n_layer: int = 32
-    n_head: int = 32
     n_kv_head: int = 8
-    n_embd: int = 4096
-    ffn_dim_multiplier: float = 1.3
     multiple_of: int = 1024
     norm_eps: float = 1e-5
     rope_theta: float = 500000.0
@@ -258,13 +259,46 @@ class LlamaConfig:
     use_kv: bool = True
     flash: bool = False  # use flashattention?
 
-    def __init__(self, **kwargs):
-        for k, v in kwargs.items():
-            if hasattr(self, k):
-                setattr(self, k, v)
+    def __post_init__(self):
         assert self.n_kv_head <= self.n_head
         assert self.n_head % self.n_kv_head == 0
         assert self.n_embd % self.n_head == 0
+
+
+LLama3_8BConfig = LlamaConfig(
+    version="3.1",
+    n_layer=32,
+    n_head=32,
+    n_embd=4096,
+    ffn_dim_multiplier=1.3,
+    tied_embeddings=False
+)
+
+LLama3_3BConfig = LlamaConfig(
+    version="3.2",
+    n_layer=28,
+    n_head=24,
+    n_embd=3072,
+    ffn_dim_multiplier=1.0,
+    tied_embeddings=True
+)
+
+LLama3_1BConfig = LlamaConfig(
+    version="3.2",
+    n_layer=16,
+    n_head=32,
+    n_embd=2048,
+    ffn_dim_multiplier=1.4,
+    tied_embeddings=True
+)
+
+
+MODEL_DICT: Dict[str, LlamaConfig] = {
+    "meta-llama/Meta-Llama-3.1-8B": LLama3_8BConfig,
+    "meta-llama/Llama-3.2-3B": LLama3_3BConfig,
+    "meta-llama/Llama-3.2-1B": LLama3_1BConfig,
+}
+
 
 class LLaMA(nn.Module):
 
@@ -278,17 +312,20 @@ class LLaMA(nn.Module):
             ln_f = RMSNorm(config.n_embd, config.norm_eps),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        if config.tied_embeddings:
+            self.transformer.wte.weight = self.lm_head.weight
 
         # init all weights, use a torch rng object to be very careful
         self.init_rng = torch.Generator()
         self.init_rng.manual_seed(42)
 
-        self.freqs_cis = precompute_freqs_cis(
+        freqs_cis = precompute_freqs_cis(
             config.n_embd // config.n_head,
             config.block_size * 2,
             config.rope_theta,
             config.use_scaled_rope,
         )
+        self.register_buffer('freqs_cis', freqs_cis, persistent=False)
 
     def forward(self, idx, targets=None, return_logits=True, start_pos=0):
         _, t = idx.size()
@@ -296,7 +333,7 @@ class LLaMA(nn.Module):
 
         # forward the LLaMA model itself
         x = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
-        freqs_cis = self.freqs_cis[start_pos:start_pos+t]
+        freqs_cis = torch.view_as_complex(self.freqs_cis[start_pos:start_pos+t])
         mask = torch.triu(torch.ones((t, t), device=next(self.parameters()).device, dtype=torch.bool), diagonal=1)
 
         for i, block in enumerate(self.transformer.h):
@@ -398,11 +435,16 @@ class LLaMA(nn.Module):
         return checkpoint
 
     @classmethod
-    def from_pretrained_llama3_hf(cls, model_id):
+    def from_pretrained_llama3_hf(cls, model_id, untie):
         """Loads pretrained LLaMA model weights from HuggingFace"""
         from transformers import AutoModelForCausalLM, AutoTokenizer
-        assert model_id == "meta-llama/Meta-Llama-3.1-8B", "Only the 8B-base model is supported for now"
-        model_args = LlamaConfig()
+        model_args = MODEL_DICT[model_id]
+        if untie:
+            if not model_args.tied_embeddings:
+                print("Model embeddings are not tied, --untie has no effect.")
+            else:
+                print("Untying token embeddings and LM head.")
+                model_args.tied_embeddings = False
 
         model = AutoModelForCausalLM.from_pretrained(model_id)
         checkpoint = LLaMA.adapt_llama_state_dict_keys_hf(model.state_dict(), model_args)
@@ -422,7 +464,7 @@ class LLaMA(nn.Module):
     @classmethod
     def from_pretrained_llama3_meta(cls, ckpt_dir, tokenizer_path):
         """Loads pretrained LLaMA model weights from a checkpoint directory"""
-        model_args = LlamaConfig()
+        model_args = LLama3_8BConfig
 
         ckpt_path = sorted(Path(ckpt_dir).glob("*.pth"))[0]
         checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=True)
@@ -842,7 +884,7 @@ def write_bf16(tensor, file):
     b = t.numpy().tobytes()
     file.write(b)
 
-def write_tensors(model_tensors, L, file, dtype):
+def write_tensors(model_tensors, L, tied, file, dtype):
     # writes LLaMA 3 model's weights to a binary file
     # things get a bit more complicated though:
     # 1) We want to maintain the ability to finetune just the biases in the C code
@@ -860,7 +902,8 @@ def write_tensors(model_tensors, L, file, dtype):
     assert dtype in {"float32", "bfloat16"}
     write_fun = write_fp32 if dtype == "float32" else write_bf16
     write_fun(model_tensors["transformer.wte.weight"], file) # (V, C)
-    write_fun(model_tensors["lm_head.weight"], file) # (V, C) # <--- hack (3) here!
+    if not tied:
+        write_fun(model_tensors["lm_head.weight"], file) # (V, C) # <--- hack (3) here!
     for i in range(L): # (L, C)
         write_fun(model_tensors[f"transformer.h.{i}.ln_1.weight"], file)
     for i in range(L): # (L, C)
@@ -920,8 +963,9 @@ def write_model(model, filename, dtype):
     header_int[7] = model.config.n_embd
     header_int[8] = model.config.multiple_of
     header_int[9] = int(model.config.use_scaled_rope)
-    header_int[10] = int(model.config.version.split('.')[0]) # major version
-    header_int[11] = int(model.config.version.split('.')[1]) # minor version
+    header_int[10] = int(model.config.tied_embeddings)
+    header_int[11] = int(model.config.version.split('.')[0]) # major version
+    header_int[12] = int(model.config.version.split('.')[1]) # minor version
     # float section of the header
     header_float = torch.zeros(256, dtype=torch.float32)
     header_float[0] = model.config.ffn_dim_multiplier
@@ -933,7 +977,7 @@ def write_model(model, filename, dtype):
     with open(filename, "wb") as file:
         file.write(header_int.numpy().tobytes()) # int header
         file.write(header_float.numpy().tobytes()) # float header
-        write_tensors(params, model.config.n_layer, file, dtype) # params
+        write_tensors(params, model.config.n_layer, model.config.tied_embeddings, file, dtype) # params
     print(f"wrote {filename}")
 
 def write_state(model, x, y, logits, loss, filename):
@@ -942,8 +986,10 @@ def write_state(model, x, y, logits, loss, filename):
     # this can be used for checking the computation correctness in C
     header = torch.zeros(256, dtype=torch.int32)
     header[0] = 20240803 # magic
-    header[1] = x.size(0) # batch size of the batch, B
-    header[2] = x.size(1) # temporal extent of the batch, T
+    header[1] = 3 # version
+    header[2] = x.size(0) # batch size of the batch, B
+    header[3] = x.size(1) # temporal extent of the batch, T
+    header[4] = 0
     grads = {name: param.grad.cpu() for name, param in model.named_parameters()}
     with open(filename, "wb") as file:
         # header
@@ -957,8 +1003,24 @@ def write_state(model, x, y, logits, loss, filename):
         # loss (single float, result of the cross entropy loss)
         write_fp32(loss.cpu(), file)
         # gradients
-        write_tensors(grads, model.config.n_layer, file, "float32")
+        write_tensors(grads, model.config.n_layer, model.config.tied_embeddings, file, "float32")
     print(f"wrote {filename}")
+
+
+def write_training_history(losses, norms, filename):
+    # amends the state file with the sequence of losses and grad norms
+    assert len(norms) == len(losses)
+    with open(filename, "r+b") as f:
+        header = np.frombuffer(f.read(256*4), dtype=np.int32).copy()
+        header[4] = len(losses)
+        f.seek(0, os.SEEK_SET)
+        f.write(header.tobytes())
+        f.seek(0, os.SEEK_END)
+        # write the losses and norms at the end of the file
+        f.write(np.asarray(losses).astype(np.float32).tobytes())
+        f.write(np.asarray(norms).astype(np.float32).tobytes())
+
+    print(f"updated {filename}")
 
 # -----------------------------------------------------------------------------
 # int main
@@ -982,7 +1044,9 @@ if __name__ == "__main__":
     parser.add_argument("--input_bin", type=str, default="dev/data/tinyshakespeare/tiny_shakespeare_val.bin", help="input .bin to train on")
     parser.add_argument("--input_val_bin", type=str, default="", help="input .bin to eval validation loss on")
     parser.add_argument("--output_dir", type=str, default="", help="output directory to which to write logs and checkpoints")
-    parser.add_argument("--model", type=str, default="meta-llama/Meta-Llama-3.1-8B", help="chose the llama model")
+    parser.add_argument("--model", type=str, default="meta-llama/Llama-3.2-1B", help="chose the llama model")
+    parser.add_argument("--depth", type=int, default=-1, help="load only a subset of the model's layers")
+    parser.add_argument("--untie", type=int, default=False, help="Untie token embeddings and LM-head, even if they are tied in the checkpoint.")
     # token layout for each step of the optimization
     parser.add_argument("--batch_size", type=int, default=4, help="batch size, in units of #batch dimensions")
     parser.add_argument("--sequence_length", type=int, default=64, help="sequence length")
@@ -1017,7 +1081,7 @@ if __name__ == "__main__":
     B, T = args.batch_size, args.sequence_length
     assert 1 <= T <= 8192, "sequence length must be between 1 and 8192"
     assert args.dtype in {"float32", "float16", "bfloat16"}
-    assert args.model in {"meta-llama/Meta-Llama-3.1-8B"}  # only 8B base model supported for now
+    assert args.model in MODEL_DICT.keys()
 
     # create the logging directory if it does not exist
     logfile = None
@@ -1061,7 +1125,7 @@ if __name__ == "__main__":
             elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
                 device = "mps"
     device_type = 'cuda' if 'cuda' in device else 'cpu'
-    assert device_type in {'cuda'}, "GPU required to run LLaMA 3"  # we need to load LLaMA as bf16 on CUDA
+    #assert device_type in {'cuda'}, "GPU required to run LLaMA 3"  # we need to load LLaMA as bf16 on CUDA
     print(f"using device: {device}")
 
     # calculate gradient accumulation from the desired total batch size and the current run configuration
@@ -1087,16 +1151,24 @@ if __name__ == "__main__":
 
     # init the model
     if args.use_hf:
-        model = LLaMA.from_pretrained_llama3_hf(args.model)
+        model = LLaMA.from_pretrained_llama3_hf(args.model, args.untie)
     else:  # use Meta's checkpoint
         assert args.ckpt_dir is not None and os.path.exists(args.ckpt_dir), f"llama3 ckpt dir {args.ckpt_dir} does not exist"
         assert args.tokenizer_path is not None and os.path.exists(args.tokenizer_path), f"llama3 tokenizer path {args.tokenizer_path} does not exist"
         model = LLaMA.from_pretrained_llama3_meta(args.ckpt_dir, args.tokenizer_path)
 
-    # convert the model to the desired precision
-    if args.dtype == "float32":
-        model = model.to(torch.float32)
+    if args.depth > 0:
+        assert args.depth < len(model.transformer.h), f"invalid depth {args.depth}, model has {len(model.transformer.h)} blocks"
+        model.transformer.h = model.transformer.h[0:args.depth]
+        model.config.n_layer = args.depth
 
+    # PT optimizer doesn't do stochastic rounding, so we
+    # really want the model to be in fp32 precision:
+    # --dtype should only enable AMP
+    # as the original checkpoints are in 16 bit, we need to convert
+    model = model.to(torch.float32)
+
+    model = model.to(device)
     model.train()
     if args.compile:
         if hasattr(config, "coordinate_descent_tuning"):
@@ -1123,10 +1195,10 @@ if __name__ == "__main__":
         logits, loss = model(x, y)
         loss.backward()
         # save model params, in bfloat16
-        model_to_size = {"meta-llama/Meta-Llama-3.1-8B": "8B"}
-        model_size_str = model_to_size[args.model] # e.g. "8B"
-        write_model(model, os.path.join(args.output_dir, f"llama3.1_{model_size_str}.bin"), dtype="float32")
-        write_model(model, os.path.join(args.output_dir, f"llama3.1_{model_size_str}_bf16.bin"), dtype="bfloat16")
+        model_size_str = args.model.split("-")[-1]
+        model_version = MODEL_DICT[args.model].version
+        write_model(model, os.path.join(args.output_dir, f"llama{model_version}_{model_size_str}.bin"), dtype="float32")
+        write_model(model, os.path.join(args.output_dir, f"llama{model_version}_{model_size_str}_bf16.bin"), dtype="bfloat16")
         # save x, y, logits, loss, and parameter gradients, for debugging C
         # always store these in fp32 to have an accurate reference (?)
         write_state(model, x, y, logits, loss, os.path.join(args.output_dir, f"llama3_{model_size_str}_debug_state.bin"))
@@ -1164,6 +1236,8 @@ if __name__ == "__main__":
     if device == "cuda":
         torch.cuda.reset_peak_memory_stats()
     timings = []
+    losses = []
+    norms = []
     norm = -1.0   # dummy value to print in inference-only mode
     for step in range(args.num_iterations + 1):
         t0 = time.time()
@@ -1257,6 +1331,7 @@ if __name__ == "__main__":
             dist.all_reduce(lossf, op=dist.ReduceOp.AVG)
         lossf = lossf.item()
         norm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+
         # determine and set the learning rate for this iteration
         lr = get_lr(step)
         for param_group in optimizer.param_groups:
@@ -1275,6 +1350,8 @@ if __name__ == "__main__":
         t1 = time.time()
         # the 0th iteration is often an outlier (much slower) => skip logging it
         tokens_per_second = grad_accum_steps * ddp_world_size * B * T / (t1-t0)
+        losses.append(lossf)
+        norms.append(norm.item())
         print0(f"step {step+1:4d}/{args.num_iterations} | train loss {lossf:.6f} | norm {norm:.4f} | lr {lr:.2e} | ({(t1-t0)*1000:.2f} ms | {tokens_per_second:.0f} tok/s)")
         # log to logile
         if master_process and logfile is not None:
@@ -1284,6 +1361,9 @@ if __name__ == "__main__":
         # keep track of smooth timings, last 20 iterations
         if step > 0 and step > args.num_iterations - 20:
             timings.append(t1-t0)
+
+    if master_process and args.write_tensors and (not args.inference_only):
+        write_training_history(losses, norms, f"llama3_{model_size_str}_debug_state.bin")
 
     # print the average of the last 20 timings, to get something smooth-ish
     timings = timings[-20:]
