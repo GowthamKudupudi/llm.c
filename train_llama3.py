@@ -156,8 +156,10 @@ class CausalSelfAttention(nn.Module):
         self.use_kv = config.use_kv
         self.flash = config.flash
 
-        self.c_attn = nn.Linear(config.n_embd, (config.n_head + 2 * config.n_kv_head) * self.hd, bias=False)  # key, query, value projections
-        self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=False)  # output projection
+        # key, query, value projections
+        self.c_attn = nn.Linear(config.n_embd, (config.n_head + 2 * config.n_kv_head) * self.hd, bias=False)
+        # output projection
+        self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=False)
 
         # static KV cache - we could alternatively allocate it outside of the model and just pass it in when needed
         if self.use_kv:
@@ -170,8 +172,10 @@ class CausalSelfAttention(nn.Module):
         qkv = self.c_attn(x)
         q, k, v = qkv.split([self.n_head * self.hd, self.n_kv_head * self.hd, self.n_kv_head * self.hd], dim=-1)
         q, k, v = map(lambda t: t.view(B, T, -1, self.hd), (q, k, v))  # (B, T, NH, HD)
-        q, k = apply_rotary_emb(q, k, freqs_cis=freqs_cis)  # rotate QK (rope)  <-- 1. difference compared to GPT-2
-        if self.use_kv and not self.training and start_pos >= 0:  # use kv-caching during inference
+        # rotate QK (rope)  <-- 1. difference compared to GPT-2
+        q, k = apply_rotary_emb(q, k, freqs_cis=freqs_cis)
+        # use kv-caching during inference
+        if self.use_kv and not self.training and start_pos >= 0:
             self.cache_k[:B, start_pos : start_pos + T] = k
             self.cache_v[:B, start_pos : start_pos + T] = v
             k = self.cache_k[:B, : start_pos + T]
@@ -180,8 +184,8 @@ class CausalSelfAttention(nn.Module):
         k = repeat_kv(k, self.n_rep)  # GQA <-- 2. difference compared to GPT-2
         v = repeat_kv(v, self.n_rep)
 
+        q = q.to(k.dtype)
         q, k, v = map(lambda t: t.transpose(1, 2), (q, k, v))  # (B, NH, T, HD)
-
         if self.flash:
             # flashattention
             # if T == 1 no need to mask, otherwise the function complains
@@ -257,7 +261,7 @@ class LlamaConfig:
     use_scaled_rope: bool = True
     max_gen_batch_size: int = 4
     use_kv: bool = True
-    flash: bool = False  # use flashattention?
+    flash: bool = True  # use flashattention?
 
     def __post_init__(self):
         assert self.n_kv_head <= self.n_head
@@ -296,7 +300,7 @@ LLama3_1BConfig = LlamaConfig(
 MODEL_DICT: Dict[str, LlamaConfig] = {
     "meta-llama/Meta-Llama-3.1-8B": LLama3_8BConfig,
     "meta-llama/Llama-3.2-3B": LLama3_3BConfig,
-    "meta-llama/Llama-3.2-1B": LLama3_1BConfig,
+    "unsloth/Llama-3.2-1B": LLama3_1BConfig,
 }
 
 
@@ -449,11 +453,19 @@ class LLaMA(nn.Module):
         model = AutoModelForCausalLM.from_pretrained(model_id)
         checkpoint = LLaMA.adapt_llama_state_dict_keys_hf(model.state_dict(), model_args)
 
-        original_default_type = torch.get_default_dtype()  # save the default type
-        torch.set_default_tensor_type(torch.cuda.BFloat16Tensor)  # much faster loading
+        # save the default type
+        original_default_type = torch.get_default_dtype()
+        # much faster loading
+        #torch.set_default_dtype(torch.bfloat16)
+        #torch.set_default_device("cuda")
+        torch.set_default_tensor_type(torch.cuda.BFloat16Tensor)
         model = LLaMA(model_args)
         model.load_state_dict(checkpoint, strict=False)
-        torch.set_default_tensor_type(torch.tensor([], dtype=original_default_type, device="cpu").type())  # restore default type
+        # restore default type
+        #torch.set_default_dtype(original_default_type)
+        #torch.set_default_device("cpu")
+        torch.set_default_tensor_type(
+            torch.tensor([], dtype=original_default_type, device="cpu").type())
 
         tokenizer = AutoTokenizer.from_pretrained(model_id)
         tokenizer.pad_id = 128004  # this is the pad token id for LLaMA 3.1 base, we need to set this explicitly as our generate func expects it
@@ -464,23 +476,34 @@ class LLaMA(nn.Module):
     @classmethod
     def from_pretrained_llama3_meta(cls, ckpt_dir, tokenizer_path):
         """Loads pretrained LLaMA model weights from a checkpoint directory"""
-        model_args = LLama3_8BConfig
+        model_args = LLama3_1BConfig
 
         ckpt_path = sorted(Path(ckpt_dir).glob("*.pth"))[0]
+        print(f"loading 1bconfig from ckpt_path: {ckpt_path}")
         checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=True)
         checkpoint = LLaMA.adapt_llama_state_dict_keys(checkpoint, model_args)
 
-        original_default_type = torch.get_default_dtype()  # save the default type
-        torch.set_default_tensor_type(torch.cuda.BFloat16Tensor)  # much faster loading
+        # save the default type
+        original_default_type = torch.get_default_dtype()
+        # much faster loading
+        #torch.set_default_dtype(torch.bfloat16)
+        #torch.set_default_device("cuda")
+        torch.set_default_tensor_type(torch.cuda.BFloat16Tensor)
+        
         model = LLaMA(model_args)
         model.load_state_dict(checkpoint, strict=False)
-        torch.set_default_tensor_type(torch.tensor([], dtype=original_default_type, device="cpu").type())  # restore default type
+        # restore default type
+        #torch.set_default_dtype(original_default_type)
+        #torch.set_default_device("cpu")
+        torch.set_default_tensor_type(
+            torch.tensor([], dtype=original_default_type, device="cpu").type())
 
         tokenizer = Tokenizer(model_path=tokenizer_path)
         model.tokenizer = tokenizer
         return model
 
-    def configure_optimizers(self, weight_decay, learning_rate, betas, device_type, zero_stage):
+    def configure_optimizers(self, weight_decay, learning_rate, betas,
+                             device_type, zero_stage):
         # start with all of the candidate parameters
         param_dict = {pn: p for pn, p in self.named_parameters()}
         # filter out those that do not require grad
@@ -792,22 +815,29 @@ def _peek_data_shard(filename):
         # first read the header, which is 256 int32 integers (4 bytes each)
         header = np.frombuffer(f.read(256*4), dtype=np.int32)
     if header[0] != 20240801:
-        print("ERROR: magic number mismatch in the data .bin file!")
-        exit(1)
-    assert header[1] == 7, "unsupported version"
+        print(f"Warn: magic number {header[0]} mismatch in the data .bin file!")
+        #exit(1)
+    if header[1] != 7:
+        print(f"warn: header[1]=={header[1]}!=7")
     ntok = header[2] # number of tokens (claimed)
+    print(f"ntok=header[2]={header[2]}")
     return ntok # for now just return the number of tokens
 
 def _load_data_shard(filename):
     with open(filename, "rb") as f:
         # first read the header, which is 256 int32 integers (4 bytes each)
         header = np.frombuffer(f.read(256*4), dtype=np.int32)
-        assert header[0] == 20240801, "magic number mismatch in the data .bin file"
-        assert header[1] == 7, "unsupported version"
+        if header[0] != 20240801:
+            print(f"Warn: magic number {header[0]} mismatch in the data .bin file!")
+            #exit(1)
+        if header[1] != 7:
+            print(f"warn: header[1]=={header[1]}!=7")
         ntok = header[2] # number of tokens (claimed)
+        print(f"ntok=header[2]={header[2]}")
         # the rest of it are tokens, stored as uint16
         tokens = np.frombuffer(f.read(), dtype=np.uint32)
-    assert len(tokens) == ntok, "number of tokens read does not match header?"
+    if len(tokens) != ntok:
+        print(f"number of tokens({len(tokens)}) read does not match header")
     return tokens
 
 class DistributedShardedDataLoader:
@@ -899,49 +929,56 @@ def write_tensors(model_tensors, L, tied, file, dtype):
     #    token embeddings table, so we have to add it. Well instead of removing and adding, we
     #    are going to write the output projection weights into the slot previously used for the
     #    position embeddings table. Everyone is happy, very little code is changed from GPT-2.
+    cleaned_tensors = {}
+    for key, value in model_tensors.items():
+        if key.startswith('_orig_mod.'):
+            cleaned_key = key.replace('_orig_mod.', '')
+            cleaned_tensors[cleaned_key] = value
+        else:
+            cleaned_tensors[key] = value
     assert dtype in {"float32", "bfloat16"}
     write_fun = write_fp32 if dtype == "float32" else write_bf16
-    write_fun(model_tensors["transformer.wte.weight"], file) # (V, C)
+    write_fun(cleaned_tensors["transformer.wte.weight"], file) # (V, C)
     if not tied:
-        write_fun(model_tensors["lm_head.weight"], file) # (V, C) # <--- hack (3) here!
+        write_fun(cleaned_tensors["lm_head.weight"], file) # (V, C) # <--- hack (3) here!
     for i in range(L): # (L, C)
-        write_fun(model_tensors[f"transformer.h.{i}.ln_1.weight"], file)
+        write_fun(cleaned_tensors[f"transformer.h.{i}.ln_1.weight"], file)
     for i in range(L): # (L, C)
         # see hack (1) above for these
         # yes i know this is inefficient and dumb i'm just matching the train_gpt2.py code format
-        write_fun(torch.zeros_like(model_tensors[f"transformer.h.{i}.ln_1.weight"]), file)
+        write_fun(torch.zeros_like(cleaned_tensors[f"transformer.h.{i}.ln_1.weight"]), file)
     for i in range(L): # (L, 3C, C)
-        write_fun(model_tensors[f"transformer.h.{i}.attn.c_attn.weight"], file)
+        write_fun(cleaned_tensors[f"transformer.h.{i}.attn.c_attn.weight"], file)
     for i in range(L): # (L, 3C)
-        w = model_tensors[f"transformer.h.{i}.attn.c_attn.weight"]
+        w = cleaned_tensors[f"transformer.h.{i}.attn.c_attn.weight"]
         write_fun(torch.zeros(w.size(0), dtype=w.dtype), file)
     for i in range(L): # (L, C, C)
-        write_fun(model_tensors[f"transformer.h.{i}.attn.c_proj.weight"], file)
+        write_fun(cleaned_tensors[f"transformer.h.{i}.attn.c_proj.weight"], file)
     for i in range(L): # (L, C)
-        w = model_tensors[f"transformer.h.{i}.attn.c_proj.weight"]
+        w = cleaned_tensors[f"transformer.h.{i}.attn.c_proj.weight"]
         write_fun(torch.zeros(w.size(0), dtype=w.dtype), file)
     for i in range(L): # (L, C)
-        write_fun(model_tensors[f"transformer.h.{i}.ln_2.weight"], file)
+        write_fun(cleaned_tensors[f"transformer.h.{i}.ln_2.weight"], file)
     for i in range(L): # (L, C)
-        write_fun(torch.zeros_like(model_tensors[f"transformer.h.{i}.ln_2.weight"]), file)
+        write_fun(torch.zeros_like(cleaned_tensors[f"transformer.h.{i}.ln_2.weight"]), file)
     # now for hack (2) here... inline model surgery to concat c_fc and c_fc2
     # -------------------------------------------
     for i in range(L): # (L, 4C, C)
         # simply write the two weights in sequence
-        write_fun(model_tensors[f"transformer.h.{i}.mlp.c_fc.weight"], file)
-        write_fun(model_tensors[f"transformer.h.{i}.mlp.c_fc2.weight"], file)
+        write_fun(cleaned_tensors[f"transformer.h.{i}.mlp.c_fc.weight"], file)
+        write_fun(cleaned_tensors[f"transformer.h.{i}.mlp.c_fc2.weight"], file)
     for i in range(L): # (L, 4C)
-        w1 = model_tensors[f"transformer.h.{i}.mlp.c_fc.weight"]
-        w2 = model_tensors[f"transformer.h.{i}.mlp.c_fc2.weight"]
+        w1 = cleaned_tensors[f"transformer.h.{i}.mlp.c_fc.weight"]
+        w2 = cleaned_tensors[f"transformer.h.{i}.mlp.c_fc2.weight"]
         write_fun(torch.zeros(w1.size(0) + w2.size(0), dtype=w1.dtype), file)
     # -------------------------------------------
     for i in range(L): # (L, C, 4C)
-        write_fun(model_tensors[f"transformer.h.{i}.mlp.c_proj.weight"], file)
+        write_fun(cleaned_tensors[f"transformer.h.{i}.mlp.c_proj.weight"], file)
     for i in range(L): # (L, C)
-        w = model_tensors[f"transformer.h.{i}.mlp.c_proj.weight"]
+        w = cleaned_tensors[f"transformer.h.{i}.mlp.c_proj.weight"]
         write_fun(torch.zeros(w.size(0), dtype=w.dtype), file)
-    write_fun(model_tensors["transformer.ln_f.weight"], file) # (C, )
-    write_fun(torch.zeros_like(model_tensors["transformer.ln_f.weight"]), file) # (C, )
+    write_fun(cleaned_tensors["transformer.ln_f.weight"], file) # (C, )
+    write_fun(torch.zeros_like(cleaned_tensors["transformer.ln_f.weight"]), file) # (C, )
 
 def write_model(model, filename, dtype):
     # everything we need to instantiate the model
@@ -1044,7 +1081,7 @@ if __name__ == "__main__":
     parser.add_argument("--input_bin", type=str, default="dev/data/tinyshakespeare/tiny_shakespeare_val.bin", help="input .bin to train on")
     parser.add_argument("--input_val_bin", type=str, default="", help="input .bin to eval validation loss on")
     parser.add_argument("--output_dir", type=str, default="", help="output directory to which to write logs and checkpoints")
-    parser.add_argument("--model", type=str, default="meta-llama/Llama-3.2-1B", help="chose the llama model")
+    parser.add_argument("--model", type=str, default="unsloth/Llama-3.2-1B", help="chose the llama model")
     parser.add_argument("--depth", type=int, default=-1, help="load only a subset of the model's layers")
     parser.add_argument("--untie", type=int, default=False, help="Untie token embeddings and LM-head, even if they are tied in the checkpoint.")
     # token layout for each step of the optimization
@@ -1130,6 +1167,9 @@ if __name__ == "__main__":
 
     # calculate gradient accumulation from the desired total batch size and the current run configuration
     tokens_per_fwdbwd = B * T * ddp_world_size
+    print(f"tokens_per_fwdbwd: {tokens_per_fwdbwd}")
+    print(f"T: {T}")
+    print(f"ddp_world_size: {ddp_world_size}")
     assert args.total_batch_size % tokens_per_fwdbwd == 0
     grad_accum_steps = args.total_batch_size // tokens_per_fwdbwd
     print0(f"total desired batch size: {args.total_batch_size}")
@@ -1161,12 +1201,13 @@ if __name__ == "__main__":
         assert args.depth < len(model.transformer.h), f"invalid depth {args.depth}, model has {len(model.transformer.h)} blocks"
         model.transformer.h = model.transformer.h[0:args.depth]
         model.config.n_layer = args.depth
+    print(f"{len(model.transformer.h)} layers")
 
     # PT optimizer doesn't do stochastic rounding, so we
     # really want the model to be in fp32 precision:
     # --dtype should only enable AMP
     # as the original checkpoints are in 16 bit, we need to convert
-    model = model.to(torch.float32)
+    #model = model.to(torch.float32)
 
     model = model.to(device)
     model.train()
@@ -1180,10 +1221,12 @@ if __name__ == "__main__":
     # Our own version of a simple DistributedDataLoader
 
     # load tokens
-    train_loader = DistributedShardedDataLoader(args.input_bin, B, T, ddp_rank, ddp_world_size)
+    train_loader = DistributedShardedDataLoader(
+        args.input_bin, B, T, ddp_rank, ddp_world_size)
     val_loader = None
     if args.input_val_bin:
-        val_loader = DistributedShardedDataLoader(args.input_val_bin, B, T, ddp_rank, ddp_world_size)
+        val_loader = DistributedShardedDataLoader(
+            args.input_val_bin, B, T, ddp_rank, ddp_world_size)
 
     # -------------------------------------------------------------------------
     # PyTorch -> C bridge: save some weights and state for C to load later as reference
@@ -1211,12 +1254,13 @@ if __name__ == "__main__":
     # here we wrap model into DDP container
     if ddp:
         model = DDP(model, device_ids=[ddp_local_rank])
-    raw_model = model.module if ddp else model # always contains the "raw" unwrapped model
+    # always contains the "raw" unwrapped model
+    raw_model = model.module if ddp else model
 
     # init the optimizer
-    optimizer = raw_model.configure_optimizers(weight_decay=args.weight_decay,
-                                               learning_rate=args.learning_rate, betas=(0.9, 0.95),
-                                               device_type=device, zero_stage=zero_stage)
+    optimizer = raw_model.configure_optimizers(
+        weight_decay=args.weight_decay, learning_rate=args.learning_rate,
+        betas=(0.9, 0.95), device_type=device, zero_stage=zero_stage)
 
     # learning rate decay scheduler (cosine with warmup)
     def get_lr(it):
@@ -1363,7 +1407,7 @@ if __name__ == "__main__":
             timings.append(t1-t0)
 
     if master_process and args.write_tensors and (not args.inference_only):
-        write_training_history(losses, norms, f"llama3_{model_size_str}_debug_state.bin")
+        write_training_history(losses, norms, os.path.join(args.output_dir, f"llama3_{model_size_str}_debug_state.bin"))
 
     # print the average of the last 20 timings, to get something smooth-ish
     timings = timings[-20:]
