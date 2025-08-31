@@ -116,7 +116,8 @@ def apply_rotary_emb(
 def precompute_freqs_cis(
     dim: int, end: int, theta: float = 10000.0, use_scaled: bool = False
 ):
-    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
+    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() /
+                             dim))
     t = torch.arange(end, device=freqs.device, dtype=torch.float32)
     if use_scaled:
         freqs = apply_scaling(freqs)
@@ -157,21 +158,33 @@ class CausalSelfAttention(nn.Module):
         self.flash = config.flash
 
         # key, query, value projections
-        self.c_attn = nn.Linear(config.n_embd, (config.n_head + 2 * config.n_kv_head) * self.hd, bias=False)
+        self.c_attn = nn.Linear(
+            config.n_embd, (config.n_head + 2 * config.n_kv_head) * self.hd,
+            bias=False)
         # output projection
         self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=False)
 
-        # static KV cache - we could alternatively allocate it outside of the model and just pass it in when needed
+        # static KV cache - we could alternatively allocate it outside of the
+        # model and just pass it in when needed
         if self.use_kv:
-            self.cache_k = torch.zeros((config.max_gen_batch_size, config.block_size, config.n_kv_head, self.hd))
-            self.cache_v = torch.zeros((config.max_gen_batch_size, config.block_size, config.n_kv_head, self.hd))
+            self.cache_k = torch.zeros(
+                (config.max_gen_batch_size, config.block_size, config.n_kv_head,
+                 self.hd))
+            self.cache_v = torch.zeros(
+                (config.max_gen_batch_size, config.block_size, config.n_kv_head,
+                 self.hd))
 
     def forward(self, x, freqs_cis=None, start_pos=None, mask=None):
-        B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
-        # calculate query, key, values for all heads in batch and move head forward to be the batch dim
+        # batch size, sequence length, embedding dimensionality (n_embd)
+        B, T, C = x.size()
+        # calculate query, key, values for all heads in batch and move head
+        # forward to be the batch dim
         qkv = self.c_attn(x)
-        q, k, v = qkv.split([self.n_head * self.hd, self.n_kv_head * self.hd, self.n_kv_head * self.hd], dim=-1)
-        q, k, v = map(lambda t: t.view(B, T, -1, self.hd), (q, k, v))  # (B, T, NH, HD)
+        q, k, v = qkv.split(
+            [self.n_head * self.hd, self.n_kv_head * self.hd,
+             self.n_kv_head * self.hd], dim=-1)
+        # (B, T, NH, HD)
+        q, k, v = map(lambda t: t.view(B, T, -1, self.hd), (q, k, v))
         # rotate QK (rope)  <-- 1. difference compared to GPT-2
         q, k = apply_rotary_emb(q, k, freqs_cis=freqs_cis)
         # use kv-caching during inference
@@ -189,12 +202,15 @@ class CausalSelfAttention(nn.Module):
         if self.flash:
             # flashattention
             # if T == 1 no need to mask, otherwise the function complains
-            # scaled_dot_product_attention expects a mask where value of True indicates that the element should take part in attention
+            # scaled_dot_product_attention expects a mask where value of True
+            # indicates that the element should take part in attention
             # our mask is the opposite, so we need to invert it
-            y = F.scaled_dot_product_attention(q, k, v, mask == 0 if T > 1 else None)
+            y = F.scaled_dot_product_attention(
+                q, k, v, mask == 0 if T > 1 else None)
         else:
             # manual implementation of attention
-            # this materializes the large (T,T) matrix for all the queries and keys
+            # this materializes the large (T,T) matrix for all the queries and
+            # keys
             scores = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(self.hd))
             if mask is not None:
                 scores.masked_fill_(mask, torch.finfo(scores.dtype).min)
@@ -213,13 +229,15 @@ class MLP(nn.Module):
         # custom dim factor multiplier
         if config.ffn_dim_multiplier is not None:
             hidden_dim = int(config.ffn_dim_multiplier * hidden_dim)
-        hidden_dim = config.multiple_of * ((hidden_dim + config.multiple_of - 1) // config.multiple_of)
+        hidden_dim = config.multiple_of * (
+            (hidden_dim + config.multiple_of - 1) // config.multiple_of)
         self.c_fc = nn.Linear(config.n_embd, hidden_dim, bias=False)
         self.c_fc2 = nn.Linear(config.n_embd, hidden_dim, bias=False)
         self.c_proj = nn.Linear(hidden_dim, config.n_embd, bias=False)
 
     def forward(self, x):
-        # SwiGLU self.c_proj(F.silu(self.c_fc2(x)) * self.c_fc(x))  <-- 3. difference compared to GPT-2
+        # SwiGLU self.c_proj(F.silu(self.c_fc2(x)) * self.c_fc(x))  <-- 3.
+        # difference compared to GPT-2
         x1 = self.c_fc(x)
         x2 = self.c_fc2(x)
         x2 = F.silu(x2)
@@ -333,12 +351,16 @@ class LLaMA(nn.Module):
 
     def forward(self, idx, targets=None, return_logits=True, start_pos=0):
         _, t = idx.size()
-        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
+        assert t <= self.config.block_size, (
+            f"Cannot forward sequence of length {t}, block size is only"
+            " {self.config.block_size}")
 
         # forward the LLaMA model itself
         x = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
         freqs_cis = torch.view_as_complex(self.freqs_cis[start_pos:start_pos+t])
-        mask = torch.triu(torch.ones((t, t), device=next(self.parameters()).device, dtype=torch.bool), diagonal=1)
+        mask = torch.triu(
+            torch.ones((t, t), device=next(self.parameters()).device,
+                       dtype=torch.bool), diagonal=1)
 
         for i, block in enumerate(self.transformer.h):
             x = block(x, freqs_cis, start_pos, mask)
@@ -347,13 +369,17 @@ class LLaMA(nn.Module):
         if targets is not None:
             # if we are given some desired targets also calculate the loss
             logits = self.lm_head(x).float()
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)),
+                                   targets.view(-1), ignore_index=-1)
         else:
-            # inference-time mini-optimization: only forward the lm_head on the very last position
-            logits = self.lm_head(x[:, [-1], :]).float() # note: using list [-1] to preserve the time dim
+            # inference-time mini-optimization: only forward the lm_head on the
+            # very last position
+            # note: using list [-1] to preserve the time dim
+            logits = self.lm_head(x[:, [-1], :]).float() 
             loss = None
 
-        # there are performance reasons why not returning logits is prudent, if not needed
+        # there are performance reasons why not returning logits is prudent,
+        # if not needed
         if not return_logits:
             logits = None
 
@@ -363,12 +389,15 @@ class LLaMA(nn.Module):
     def adapt_llama_state_dict_keys(checkpoint, config: LlamaConfig):
         # Modify key names from Meta's LLaMA to our LLaMA
         # our key names are derived from GPT-2's key names
-        checkpoint['transformer.wte.weight'] = checkpoint.pop('tok_embeddings.weight')
+        checkpoint['transformer.wte.weight'] = (
+            checkpoint.pop('tok_embeddings.weight'))
 
         for i in range(config.n_layer):
             for name in ['attention_norm', 'ffn_norm']:
-                old_key = f'layers.{i}.{name}.weight'  # e.g. layers.x.attention_norm.weight -> transformer.h.x.ln_1.weight
-                new_key = f'transformer.h.{i}.ln_{1 if name == "attention_norm" else 2}.weight'
+                # layers.x.attention_norm.weight -> transformer.h.x.ln_1.weight
+                old_key = f'layers.{i}.{name}.weight'
+                new_key = (f'transformer.h.{i}.ln_'
+                           '{1 if name == "attention_norm" else 2}.weight')
                 checkpoint[new_key] = checkpoint.pop(old_key)
 
         for i in range(config.n_layer):
@@ -378,16 +407,20 @@ class LLaMA(nn.Module):
                 if name == 'attention.wq':
                     checkpoint[new_key] = checkpoint.pop(old_key)
                 else:  # merge 3 weights into transformer.h.x.attn.c_attn.weight
-                    checkpoint[new_key] = torch.cat((checkpoint[new_key], checkpoint.pop(old_key)), dim=0)
+                    checkpoint[new_key] = torch.cat(
+                        (checkpoint[new_key], checkpoint.pop(old_key)), dim=0)
             old_key = f'layers.{i}.attention.wo.weight'
             new_key = f'transformer.h.{i}.attn.c_proj.weight'
             checkpoint[new_key] = checkpoint.pop(old_key)
 
         ffn_map = {'w1': 'c_fc2', 'w2': 'c_proj', 'w3': 'c_fc'}
         for i in range(config.n_layer):
-            for name in ['feed_forward.w1', 'feed_forward.w2', 'feed_forward.w3']:
+            for name in [
+                    'feed_forward.w1', 'feed_forward.w2', 'feed_forward.w3']:
                 old_key = f'layers.{i}.{name}.weight'
-                new_key = f'transformer.h.{i}.mlp.{ffn_map[name.split(".")[-1]]}.weight'
+                new_key = (
+                    f'transformer.h.{i}.mlp.{ffn_map[name.split(".")[-1]]}.'
+                    'weight')
                 checkpoint[new_key] = checkpoint.pop(old_key)
 
         checkpoint['transformer.ln_f.weight'] = checkpoint.pop('norm.weight')
@@ -399,42 +432,58 @@ class LLaMA(nn.Module):
     def adapt_llama_state_dict_keys_hf(checkpoint, config: LlamaConfig):
         # Modify key names from HuggingFace's LLaMA to our LLaMA
         # our key names are derived from GPT-2's key names
-        checkpoint['transformer.wte.weight'] = checkpoint.pop('model.embed_tokens.weight')
+        checkpoint['transformer.wte.weight'] = (
+            checkpoint.pop('model.embed_tokens.weight'))
 
-        # We need to unpermute K and V because HF script permuted the original Meta-LLaMA weights
+        # We need to unpermute K and V because HF script permuted the original
+        # Meta-LLaMA weights
         # see: https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/convert_llama_weights_to_hf.py
         def unpermute(w, n_heads, dim1, dim2):
-            return w.view(n_heads, 2, dim1 // n_heads // 2, dim2).transpose(1, 2).reshape(dim1, dim2)
+            return w.view(n_heads, 2, dim1 // n_heads // 2, dim2).transpose(
+                1, 2).reshape(dim1, dim2)
 
         for i in range(config.n_layer):
             for name in ['input_layernorm', 'post_attention_layernorm']:
-                old_key = f'model.layers.{i}.{name}.weight'  # e.g. layers.x.attention_norm.weight -> transformer.h.x.ln_1.weight
-                new_key = f'transformer.h.{i}.ln_{1 if name == "input_layernorm" else 2}.weight'
+                # e.g. layers.x.attention_norm.weight ->
+                # transformer.h.x.ln_1.weight
+                old_key = f'model.layers.{i}.{name}.weight'
+                new_key = (
+                    f'transformer.h.{i}.ln_'
+                    '{1 if name == "input_layernorm" else 2}.weight')
                 checkpoint[new_key] = checkpoint.pop(old_key)
 
         for i in range(config.n_layer):
-            for name in ['self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj']:
+            for name in ['self_attn.q_proj', 'self_attn.k_proj',
+                         'self_attn.v_proj']:
                 old_key = f'model.layers.{i}.{name}.weight'
                 new_key = f'transformer.h.{i}.attn.c_attn.weight'
                 if name == 'self_attn.q_proj':
-                    checkpoint[new_key] = unpermute(checkpoint.pop(old_key), config.n_head, config.n_embd, config.n_embd)
+                    checkpoint[new_key] = unpermute(
+                        checkpoint.pop(old_key), config.n_head, config.n_embd,
+                        config.n_embd)
                 else:  # merge 3 weights into transformer.h.x.attn.c_attn.weight
                     tensor = checkpoint.pop(old_key)
                     if name == 'self_attn.k_proj':
-                        tensor = unpermute(tensor, config.n_kv_head, config.n_kv_head * (config.n_embd // config.n_head), config.n_embd)
-                    checkpoint[new_key] = torch.cat((checkpoint[new_key], tensor), dim=0)
+                        tensor = unpermute(
+                            tensor, config.n_kv_head,
+                            config.n_kv_head * (config.n_embd // config.n_head),
+                            config.n_embd)
+                    checkpoint[new_key] = torch.cat(
+                        (checkpoint[new_key], tensor), dim=0)
             old_key = f'model.layers.{i}.self_attn.o_proj.weight'
             new_key = f'transformer.h.{i}.attn.c_proj.weight'
             checkpoint[new_key] = checkpoint.pop(old_key)
 
-        ffn_map = {'gate_proj': 'c_fc2', 'down_proj': 'c_proj', 'up_proj': 'c_fc'}
+        ffn_map = {
+            'gate_proj': 'c_fc2', 'down_proj': 'c_proj', 'up_proj': 'c_fc'}
         for i in range(config.n_layer):
             for name in ['gate_proj', 'down_proj', 'up_proj']:
                 old_key = f'model.layers.{i}.mlp.{name}.weight'
                 new_key = f'transformer.h.{i}.mlp.{ffn_map[name]}.weight'
                 checkpoint[new_key] = checkpoint.pop(old_key)
 
-        checkpoint['transformer.ln_f.weight'] = checkpoint.pop('model.norm.weight')
+        checkpoint['transformer.ln_f.weight'] = (
+            checkpoint.pop('model.norm.weight'))
 
         return checkpoint
 
@@ -451,24 +500,24 @@ class LLaMA(nn.Module):
                 model_args.tied_embeddings = False
 
         model = AutoModelForCausalLM.from_pretrained(model_id)
-        checkpoint = LLaMA.adapt_llama_state_dict_keys_hf(model.state_dict(), model_args)
+        checkpoint = LLaMA.adapt_llama_state_dict_keys_hf(
+            model.state_dict(), model_args)
 
         # save the default type
         original_default_type = torch.get_default_dtype()
         # much faster loading
-        #torch.set_default_dtype(torch.bfloat16)
-        #torch.set_default_device("cuda")
-        torch.set_default_tensor_type(torch.cuda.BFloat16Tensor)
+        torch.set_default_dtype(torch.bfloat16)
+        torch.set_default_device("cuda")
         model = LLaMA(model_args)
         model.load_state_dict(checkpoint, strict=False)
         # restore default type
-        #torch.set_default_dtype(original_default_type)
-        #torch.set_default_device("cpu")
-        torch.set_default_tensor_type(
-            torch.tensor([], dtype=original_default_type, device="cpu").type())
-
+        torch.set_default_dtype(original_default_type)
+        torch.set_default_device("cpu")
+        
         tokenizer = AutoTokenizer.from_pretrained(model_id)
-        tokenizer.pad_id = 128004  # this is the pad token id for LLaMA 3.1 base, we need to set this explicitly as our generate func expects it
+        # this is the pad token id for LLaMA 3.1 base, we need to set this
+        # explicitly as our generate func expects it
+        tokenizer.pad_id = 128004
         tokenizer.stop_tokens = [tokenizer.eos_token_id]
         model.tokenizer = tokenizer
         return model
@@ -487,17 +536,14 @@ class LLaMA(nn.Module):
         # save the default type
         original_default_type = torch.get_default_dtype()
         # much faster loading
-        #torch.set_default_dtype(torch.bfloat16)
-        #torch.set_default_device("cuda")
-        torch.set_default_tensor_type(torch.cuda.BFloat16Tensor)
+        torch.set_default_dtype(torch.bfloat16)
+        torch.set_default_device("cuda")
         
         model = LLaMA(model_args)
         model.load_state_dict(checkpoint, strict=False)
         # restore default type
-        #torch.set_default_dtype(original_default_type)
-        #torch.set_default_device("cpu")
-        torch.set_default_tensor_type(
-            torch.tensor([], dtype=original_default_type, device="cpu").type())
+        torch.set_default_dtype(original_default_type)
+        torch.set_default_device("cpu")
 
         tokenizer = Tokenizer(model_path=tokenizer_path)
         model.tokenizer = tokenizer
@@ -509,8 +555,10 @@ class LLaMA(nn.Module):
         param_dict = {pn: p for pn, p in self.named_parameters()}
         # filter out those that do not require grad
         param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
-        # create optim groups. Any parameters that is 2D will be weight decayed, otherwise no.
-        # i.e. all weight tensors in matmuls + embeddings decay, all biases and layernorms don't.
+        # create optim groups. Any parameters that is 2D will be weight
+        # decayed, otherwise no.
+        # i.e. all weight tensors in matmuls + embeddings decay, all biases and
+        # layernorms don't.
         decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
         nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
         optim_groups = [
@@ -519,20 +567,25 @@ class LLaMA(nn.Module):
         ]
         num_decay_params = sum(p.numel() for p in decay_params)
         num_nodecay_params = sum(p.numel() for p in nodecay_params)
-        print0(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
-        print0(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
+        print0(f"num decayed parameter tensors: {len(decay_params)}, with"
+               " {num_decay_params:,} parameters")
+        print0(f"num non-decayed parameter tensors: {len(nodecay_params)},"
+               " with {num_nodecay_params:,} parameters")
         # Create AdamW optimizer and use the fused version if it is available
-        fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
+        fused_available = 'fused' in (
+            inspect.signature(torch.optim.AdamW).parameters)
         use_fused = fused_available and device_type == 'cuda'
         print0(f"using fused AdamW: {use_fused}")
         if zero_stage == 1:
             print0("using ZeroRedundancyOptimizer")
-            optimizer = ZeroRedundancyOptimizer(**optim_groups[0], optimizer_class=torch.optim.AdamW,
-                                                lr=learning_rate, betas=betas, fused=use_fused)
+            optimizer = ZeroRedundancyOptimizer(
+                **optim_groups[0], optimizer_class=torch.optim.AdamW,
+                lr=learning_rate, betas=betas, fused=use_fused)
             optimizer.add_param_group(optim_groups[1])
         else:
             print0("using regular AdamW")
-            optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, fused=use_fused)
+            optimizer = torch.optim.AdamW(
+                optim_groups, lr=learning_rate, betas=betas, fused=use_fused)
         return optimizer
 
     @torch.inference_mode()
@@ -545,35 +598,49 @@ class LLaMA(nn.Module):
         echo: bool = False,
     ) -> Tuple[List[List[int]], Optional[List[List[float]]]]:
         """
-        Generate text sequences based on provided prompts using the language generation model.
+        Generate text sequences based on provided prompts using the language
+        generation model.
 
         Args:
-            prompt_tokens (List[List[int]]): List of tokenized prompts, where each prompt is represented as a list of integers.
+            prompt_tokens (List[List[int]]): List of tokenized prompts, where
+            each prompt is represented as a list of integers.
             max_gen_len (int): Maximum length of the generated text sequence.
-            temperature (float, optional): Temperature value for controlling randomness in sampling. Defaults to 0.6.
-            top_p (float, optional): Top-p probability threshold for nucleus sampling. Defaults to 0.9.
-            echo (bool, optional): Flag indicating whether to include prompt tokens in the generated output. Defaults to False.
+            temperature (float, optional): Temperature value for controlling
+            randomness in sampling. Defaults to 0.6.
+            top_p (float, optional): Top-p probability threshold for nucleus
+            sampling. Defaults to 0.9.
+            echo (bool, optional): Flag indicating whether to include prompt
+            tokens in the generated output. Defaults to False.
 
         Returns:
-            Tuple[List[List[int]], Optional[List[List[float]]]]: A tuple containing generated token sequences.
+            Tuple[List[List[int]], Optional[List[List[float]]]]: A tuple
+            containing generated token sequences.
 
         Note:
-            This method uses the provided prompts as a basis for generating text. It employs nucleus sampling to produce text with controlled randomness.
+            This method uses the provided prompts as a basis for generating
+            text. It employs nucleus sampling to produce text with controlled
+            randomness.
 
         """
         bsz = len(prompt_tokens)
-        assert bsz <= self.config.max_gen_batch_size, f"Batch size {bsz} exceeds the maximum generation batch size {self.config.max_gen_batch_size}"
+        assert bsz <= self.config.max_gen_batch_size, (
+            f"Batch size {bsz} exceeds the maximum generation batch size"
+            " {self.config.max_gen_batch_size}")
         device = next(self.parameters()).device
 
         min_prompt_len = min(len(t) for t in prompt_tokens)
         max_prompt_len = max(len(t) for t in prompt_tokens)
-        assert max_prompt_len <= self.config.block_size, f"Prompt length {max_prompt_len} exceeds the maximum block size {self.config.block_size}"
+        assert max_prompt_len <= self.config.block_size, (
+            f"Prompt length {max_prompt_len} exceeds the maximum block size)"
+            " {self.config.block_size}")
         total_len = min(self.config.block_size, max_gen_len + max_prompt_len)
 
         pad_id = self.tokenizer.pad_id
-        tokens = torch.full((bsz, total_len), pad_id, dtype=torch.long, device=device)
+        tokens = torch.full(
+            (bsz, total_len), pad_id, dtype=torch.long, device=device)
         for idx, t in enumerate(prompt_tokens):
-            tokens[idx, : len(t)] = torch.tensor(t, dtype=torch.long, device=device)
+            tokens[idx, : len(t)] = torch.tensor(
+                t, dtype=torch.long, device=device)
 
         prev_pos = 0
         eos_reached = torch.tensor([False] * bsz, device=device)
@@ -585,7 +652,8 @@ class LLaMA(nn.Module):
         stop_tokens = torch.tensor(list(self.tokenizer.stop_tokens)).to(device)
 
         for cur_pos in range(min_prompt_len, total_len):
-            logits, _ = self.forward(tokens[:, prev_pos:cur_pos], start_pos=prev_pos)
+            logits, _ = self.forward(
+                tokens[:, prev_pos:cur_pos], start_pos=prev_pos)
             if temperature > 0:
                 probs = torch.softmax(logits[:, -1] / temperature, dim=-1)
                 next_token = sample_top_p(probs, top_p)
@@ -594,9 +662,12 @@ class LLaMA(nn.Module):
 
             next_token = next_token.reshape(-1)
             # only replace token if prompt has already been generated
-            next_token = torch.where(input_text_mask[:, cur_pos], tokens[:, cur_pos], next_token)
+            next_token = torch.where(input_text_mask[:, cur_pos],
+                                     tokens[:, cur_pos], next_token)
             tokens[:, cur_pos] = next_token
-            eos_reached |= ~input_text_mask[:, cur_pos] & torch.isin(next_token, stop_tokens)
+            eos_reached |= (
+                ~input_text_mask[:, cur_pos] &
+                torch.isin(next_token, stop_tokens))
             prev_pos = cur_pos
             if all(eos_reached):
                 break
@@ -811,6 +882,7 @@ class Tokenizer:
 # Our own simple Distributed Data Loader
 
 def _peek_data_shard(filename):
+    print(f"peeking tokens from {filename}")
     # only reads the header, returns header data
     with open(filename, "rb") as f:
         # first read the header, which is 256 int32 integers (4 bytes each)
@@ -825,6 +897,7 @@ def _peek_data_shard(filename):
     return ntok # for now just return the number of tokens
 
 def _load_data_shard(filename):
+    print(f"loading tokens from {filename}")
     with open(filename, "rb") as f:
         # first read the header, which is 256 int32 integers (4 bytes each)
         header = np.frombuffer(f.read(256*4), dtype=np.int32)
@@ -840,6 +913,94 @@ def _load_data_shard(filename):
     if len(tokens) != ntok:
         print(f"number of tokens({len(tokens)}) read does not match header")
     return tokens
+
+class InstructionDataLoader:
+    def __init__(self, filename_pattern, B, T, process_rank, num_processes):
+        self.process_rank = process_rank
+        self.num_processes = num_processes
+        self.B = B
+        self.T = T
+        
+        # Load instruction data (assuming JSONL format)
+        with open("training_data.json", "r", encoding="utf-8") as f:   self.text_json = json.load(f)
+        self.current_index = process_rank * B
+        self.tokenizer = None  # Will be set later
+    
+    def set_tokenizer(self, tokenizer):
+        self.tokenizer = tokenizer
+    
+    def format_instruction(self, instruction_data):
+        """Format instruction according to LLaMA 3.1 chat template"""
+        if "messages" in instruction_data:
+            # Chat format
+            messages = instruction_data["messages"]
+            formatted = self.tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=False
+            )
+        else:
+            # Simple instruction-response format
+            instruction = instruction_data.get("instruction", "")
+            input_text = instruction_data.get("input", "")
+            response = instruction_data.get("response", "")
+            
+            if input_text:
+                formatted = f"<|begin_of_text|><|start_header_id|>user"
+                "<|end_header_id|>\n\n{instruction}\n\n{input_text}<|eot_id|>"
+                "<|start_header_id|>assistant<|end_header_id|>\n\n{response}"
+                "<|eot_id|>"
+            else:
+                formatted = f"<|begin_of_text|><|start_header_id|>user"
+                "<|end_header_id|>\n\n{instruction}<|eot_id|>"
+                "<|start_header_id|>assistant<|end_header_id|>\n\n{response}"
+                "<|eot_id|>"
+        return formatted
+    
+    def next_batch(self):
+        if self.tokenizer is None:
+            raise ValueError("Tokenizer not set!")
+
+        for entry in self.text_json:
+            role = entry["role"]
+            content = entry["content"]
+            #if role=="user":
+                
+        batch_texts = []
+        for i in range(self.B):
+            idx = (self.current_index + i) % len(self.instructions)
+            formatted = self.format_instruction(self.instructions[idx])
+            batch_texts.append(formatted)
+        
+        # Tokenize with appropriate special tokens
+        encodings = self.tokenizer(
+            batch_texts,
+            padding=True,
+            truncation=True,
+            max_length=self.T,
+            return_tensors="pt",
+            # We already added special tokens in formatting
+            add_special_tokens=False
+        )
+        
+        self.current_index = (self.current_index + self.B * self.num_processes) % len(self.instructions)
+        
+        # For instruction tuning, we typically mask out the instruction part
+        # and only compute loss on the response
+        input_ids = encodings["input_ids"]
+        attention_mask = encodings["attention_mask"]
+        
+        # Create labels: -100 for instruction tokens, actual tokens for response
+        labels = input_ids.clone()
+        for i, text in enumerate(batch_texts):
+            # Find the start of the assistant response
+            assistant_start = text.find("<|start_header_id|>assistant<|end_header_id|>")
+            if assistant_start != -1:
+                # Tokenize to find the position in token space
+                pre_response = text[:assistant_start]
+                pre_response_tokens = self.tokenizer.encode(pre_response, add_special_tokens=False)
+                # Mask everything before the assistant response
+                labels[i, :len(pre_response_tokens)] = -100
+        
+        return input_ids, labels, attention_mask
 
 class DistributedShardedDataLoader:
     """
@@ -867,7 +1028,8 @@ class DistributedShardedDataLoader:
             assert shard_ntok >= num_processes * B * T + 1
             ntok_total += shard_ntok
         self.ntok_total = ntok_total
-        print0(f"DataLoader: total number of tokens: {ntok_total:,} across {len(self.files)} files")
+        print0(f"DataLoader: total number of tokens: {ntok_total:,}"
+               " across {len(self.files)} files")
 
         # kick things off
         self.current_shard = None
@@ -896,7 +1058,8 @@ class DistributedShardedDataLoader:
         # advance the start pointer in current shard
         self.current_position += B * T * self.num_processes
         # if loading the next batch would be out of bounds advance the shard
-        if self.current_position + (B * T * self.num_processes + 1) > len(self.tokens):
+        if (self.current_position + (B * T * self.num_processes + 1) >
+            len(self.tokens)):
             self.advance()
         return x, y
 
@@ -1199,7 +1362,9 @@ if __name__ == "__main__":
         model = LLaMA.from_pretrained_llama3_meta(args.ckpt_dir, args.tokenizer_path)
 
     if args.depth > 0:
-        assert args.depth < len(model.transformer.h), f"invalid depth {args.depth}, model has {len(model.transformer.h)} blocks"
+        assert args.depth <= len(model.transformer.h), (
+            f"invalid depth {args.depth}, model has {len(model.transformer.h)}"
+            " blocks")
         model.transformer.h = model.transformer.h[0:args.depth]
         model.config.n_layer = args.depth
     print(f"{len(model.transformer.h)} layers")
