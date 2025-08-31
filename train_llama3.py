@@ -261,7 +261,7 @@ class LlamaConfig:
     use_scaled_rope: bool = True
     max_gen_batch_size: int = 4
     use_kv: bool = True
-    flash: bool = True  # use flashattention?
+    flash: bool = False  # use flashattention?
 
     def __post_init__(self):
         assert self.n_kv_head <= self.n_head
@@ -480,7 +480,8 @@ class LLaMA(nn.Module):
 
         ckpt_path = sorted(Path(ckpt_dir).glob("*.pth"))[0]
         print(f"loading 1bconfig from ckpt_path: {ckpt_path}")
-        checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+        checkpoint = torch.load(ckpt_path, map_location="cpu",
+                                weights_only=True)
         checkpoint = LLaMA.adapt_llama_state_dict_keys(checkpoint, model_args)
 
         # save the default type
@@ -1407,7 +1408,10 @@ if __name__ == "__main__":
             timings.append(t1-t0)
 
     if master_process and args.write_tensors and (not args.inference_only):
-        write_training_history(losses, norms, os.path.join(args.output_dir, f"llama3_{model_size_str}_debug_state.bin"))
+        write_training_history(
+            losses, norms,
+            os.path.join(args.output_dir,
+                         f"llama3_{model_size_str}_debug_state.bin"))
 
     # print the average of the last 20 timings, to get something smooth-ish
     timings = timings[-20:]
