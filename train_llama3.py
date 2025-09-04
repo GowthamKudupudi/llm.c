@@ -350,7 +350,7 @@ class LLaMA(nn.Module):
         )
         self.register_buffer('freqs_cis', freqs_cis, persistent=False)
 
-    def forward(self, idx, targets=None, attention_mask=None,
+    def forward(self, idx, targets=None,
                 return_logits=True, start_pos=0):
         _, t = idx.size()
         assert t <= self.config.block_size, (
@@ -362,13 +362,10 @@ class LLaMA(nn.Module):
         x = self.transformer.wte(idx)
         freqs_cis = torch.view_as_complex(
             self.freqs_cis[start_pos:start_pos+t])
-        # if attention_mask!=None:
-        #     mask = attention_mask
-        # else:
-            mask = torch.triu(
-                torch.ones((t, t), device=next(self.parameters()).device,
-                           dtype=torch.bool), diagonal=1)
-        print(f"mask: {mask}\n{mask.shape}")
+        mask = torch.triu(
+            torch.ones((t, t), device=next(self.parameters()).device,
+                       dtype=torch.bool), diagonal=1)
+        #print(f"mask: {mask}\n{mask.shape}")
         for i, block in enumerate(self.transformer.h):
             x = block(x, freqs_cis, start_pos, mask)
         x = self.transformer.ln_f(x)
@@ -927,18 +924,26 @@ def _load_data_shard(filename):
 import json
 from transformers import AutoTokenizer
 class InstructionDataLoader:
-    def __init__(self, filename_pattern, B, T, process_rank, num_processes):
+    def __init__(self, filename_pattern, B, T, process_rank=0,
+                 num_processes=1):
         self.process_rank = process_rank
         self.num_processes = num_processes
         self.B = B
         self.T = T
         
         # Load instruction data (assuming JSONL format)
-        with open("training_data.json", "r", encoding="utf-8") as f:   self.text_json = json.load(f)
-        self.current_index = process_rank * B
+        with open("bashRecord.json", "r", encoding="utf-8") as f:
+            self.text_json = json.load(f)
+        #process rank not yet considered; its 0 for now.
+        self.current_batch = process_rank * B
+        self.current_dialogue = 0;
         self.tokenizer = AutoTokenizer.from_pretrained(args.model)
         print(f"len(text_json): {len(self.text_json)}")
-        
+        self.x_tokens = []
+        self.y_tokens = []
+    def reset(self):
+        print("resetting data loader")
+        self.current_batch = 0
     
     def format_instruction(self, data_obj):
         """Format instruction according to LLaMA 3.1 chat template"""
@@ -950,62 +955,60 @@ class InstructionDataLoader:
             )
         else:
             # Simple instruction-response format
-            formatted = (
-                f"<|start_header_id|>{data_obj['role']}<|end_header_id|>\n"
-                f"{data_obj['content']}<|eot_id|>")
-        return formatted
+            assist = data_obj["role"]=="assistant"
+            if assist==False:
+                formatted = (
+                    f"<|start_header_id|>user<|end_header_id|>"
+                    f"{data_obj['content']}<|eot_id|><|start_header_id|>"
+                    "assistant<|end_header_id|>")
+            else:
+                formatted = (
+                    f"{data_obj['content']}<|eot_id|>"
+                )
+        #print(data_obj["role"])
+        #print(data_obj["content"])
+        return formatted, assist
     
     def next_batch(self):
-        if self.tokenizer is None:
-            raise ValueError("Tokenizer not set!")
-
-        for entry in self.text_json:
-            role = entry["role"]
-            content = entry["content"]
-            #if role=="user":
-                
-        batch_texts = []
-        for i in range(self.B):
-            idx = (self.current_index + i) % len(self.text_json)
-            formatted = self.format_instruction(self.text_json[idx])
-            batch_texts.append(formatted)
-        
-        # Tokenize with appropriate special tokens
-        encodings = self.tokenizer(
-            batch_texts,
-            padding=True,
-            truncation=True,
-            max_length=self.T,
-            return_tensors="pt",
-            # We already added special tokens in formatting
-            add_special_tokens=False
-        )
-        
-        self.current_index = (
-            self.current_index + self.B * self.num_processes) % (
-                len(self.text_json))
-        
-        # For instruction tuning, we typically mask out the instruction part
-        # and only compute loss on the response
-        input_ids = encodings["input_ids"]
-        attention_mask = encodings["attention_mask"]
-        print(f"input_ids: {input_ids}")
-        print(f"attention_mask: {attention_mask}")
-        # Create labels: -100 for instruction tokens, actual tokens for
-        # response
-        labels = input_ids.clone()
-        for i, text in enumerate(batch_texts):
-            # Find the start of the assistant response
-            assistant_start = text.find(
-                "<|start_header_id|>assistant<|end_header_id|>")
-            if assistant_start == -1:
-                # Tokenize to find the position in token space
-                pre_tokens = self.tokenizer.encode(
-                    text, add_special_tokens=False)
-                # Mask everything before the assistant response
-                labels[i, :len(pre_tokens)] = -100
-        
-        return input_ids, labels, attention_mask
+        tokens_read = len(self.x_tokens) - self.current_batch * self.T * self.B
+        print(f"tokens_read: {tokens_read},{self.current_batch, self.B}")
+        print(f"len(x_tokens): {len(self.x_tokens), len(self.text_json)}")
+        while tokens_read < 2 * self.B * self.T and (
+                self.current_dialogue  < len(self.x_tokens)):
+            idx = self.current_dialogue
+            if (idx == len(self.text_json)):
+                self.reset()
+                break
+            formatted, assist = self.format_instruction(
+                self.text_json[idx])
+            print(formatted)
+            tokenized = self.tokenizer.encode(formatted)
+            self.x_tokens.extend(tokenized)
+            if assist==False:
+                self.y_tokens.extend(
+                    [self.tokenizer.pad_token_id] * (len(tokenized)))
+            else:
+                self.y_tokens.extend(tokenized)
+            tokens_read += len(tokenized)
+            self.current_dialogue += 1
+            
+        current_token=self.current_batch*self.B*self.T
+        end_token = current_token+self.B*self.T
+        self.current_batch += self.B
+        if end_token>len(self.x_tokens):
+            print("end_token>len(self.x_tokens) "
+                  f"{end_token, len(self.x_tokens)}")
+            self.x_tokens.extend(
+                [self.tokenizer.pad_token_id] * (end_token+
+                                                 -len(self.x_tokens)))
+            self.y_tokens.extend(
+                [self.tokenizer.pad_token_id] * (end_token+
+                                                 1-len(self.y_tokens)))
+            self.current_batch = 0
+            
+        #print(f"self.current_batch: {self.current_batch}")
+        return (torch.tensor([self.x_tokens[current_token:end_token]]),
+                torch.tensor([self.y_tokens[current_token+1:end_token+1]]))
 
 class DistributedShardedDataLoader:
     """
@@ -1068,7 +1071,7 @@ class DistributedShardedDataLoader:
         if (self.current_position + (B * T * self.num_processes + 1) >
             len(self.tokens)):
             self.advance()
-        return x, y, None
+        return x, y
 
 # -----------------------------------------------------------------------------
 # Python -> C bridge utilities for saving params/grads/activations to .bin
@@ -1318,7 +1321,7 @@ if __name__ == "__main__":
     parser.add_argument("--sample_every", type=int, default=0,
                         help="how often to sample from the model?")
     # debugging
-    parser.add_argument("--overfit_single_batch", type=int, default=1,
+    parser.add_argument("--overfit_single_batch", type=int, default=0,
                         help="overfit just one batch of data")
     # numerics
     parser.add_argument("--tensorcores", type=int, default=0,
@@ -1397,7 +1400,8 @@ if __name__ == "__main__":
     #assert device_type in {'cuda'}, "GPU required to run LLaMA 3"
     print(f"using device: {device}")
 
-    # calculate gradient accumulation from the desired total batch size and the current run configuration
+    # calculate gradient accumulation from the desired total batch size and
+    # the current run configuration
     tokens_per_fwdbwd = B * T * ddp_world_size
     print(f"tokens_per_fwdbwd: {tokens_per_fwdbwd}")
     print(f"T: {T}")
@@ -1483,21 +1487,22 @@ if __name__ == "__main__":
 
     # do one forward pass to generate ground truth for our C tests
     if master_process and args.write_tensors and (not args.inference_only):
-        x, y, am = train_loader.next_batch()
+        x, y = train_loader.next_batch()
         x, y = x.to(device), y.to(device)
-        am = am.to(device) if am is not None else None
-        logits, loss = model(x, y, am)
+        logits, loss = model(x, y)
         loss.backward()
         # save model params, in bfloat16
         model_size_str = args.model.split("-")[-1]
         model_version = MODEL_DICT[args.model].version
-        write_model(model, dtype="float32",
+        write_model(model,
                     os.path.join(args.output_dir,
-                                 f"llama{model_version}_{model_size_str}.bin"))
+                                 f"llama{model_version}_{model_size_str}.bin"),
+                    dtype="float32")
         write_model(
-            model, dtype="bfloat16", os.path.join(
+            model, os.path.join(
                 args.output_dir,
-                f"llama{model_version}_{model_size_str}_bf16.bin"))
+                f"llama{model_version}_{model_size_str}_bf16.bin"),
+            dtype="bfloat16")
         # save x, y, logits, loss, and parameter gradients, for debugging C
         # always store these in fp32 to have an accurate reference (?)
         write_state(model, x, y, logits, loss,
@@ -1572,33 +1577,61 @@ if __name__ == "__main__":
             and (step % args.sample_every == 0 or last_step)) \
             and master_process:
             model.eval()
-            prompts: List[str] = [
-        "Clearly, the meaning of life is",
-        "Simply put, the theory of relativity states that",
-        """The repo llm.c on GitHub is""",
-        """Translate English to French:
+            prompts = []
+            if not args.instruct:
+                prompts = [
+                    "Clearly, the meaning of life is",
+                    "Simply put, the theory of relativity states that",
+                    """The repo llm.c on GitHub is""",
+                    """Translate English to French:
+                    
+                    sea otter => loutre de mer
+                    peppermint => menthe poivrée
+                    plush girafe => girafe peluche
+                    cheese =>""",
+                ]
+            else:
+                prompts = [{
+                    "role":"user",
+                    "content":"whats current directory"
+                },{
+                    "role":"user",
+                    "content":"whats time"
+                }]
 
-        sea otter => loutre de mer
-        peppermint => menthe poivrée
-        plush girafe => girafe peluche
-        cheese =>""",
-            ]
             if args.use_hf:
-                prompt_tokens = [model.tokenizer(x).input_ids for x in prompts]
+                if args.instruct:
+                    prompt_tokens = []
+                    for prompt in prompts:
+                        ptks, _ = train_loader.format_instruction(prompt)
+                        print(ptks)
+                        ptks = model.tokenizer.encode(ptks)
+                        print(ptks)
+                        prompt_tokens.append(ptks)
+                else:
+                    prompt_tokens = [
+                        model.tokenizer(x).input_ids for x in prompts]
             else:  # Meta
-                prompt_tokens = [model.tokenizer.encode(
-                    x, bos=True, eos=False) for x in prompts]
-
+                prompt_tokens = [
+                    (model.tokenizer.encode(x, bos=True, eos=False) 
+                     for x in prompts)]
+                
             generation_tokens = model.generate(
                 prompt_tokens, max_gen_len=64, temperature=0.6, top_p=0.9,
                 echo=False)
             results = [
                 {"generation": model.tokenizer.decode(t)} for t in (
                     generation_tokens)]
-            for prompt, result in zip(prompts, results):
-                print(prompt, end="")
-                print(f"{result['generation']}")
-                print("\n==================================\n")
+            if not args.instruct:
+                for prompt, result in zip(prompts, results):
+                    print(prompt, end="")
+                    print(f"{result['generation']}")
+                    print("\n==================================\n")
+            else:
+                for prompt, result in zip(prompts, results):
+                    print(prompt['content'])
+                    print(f"{result['generation']}")
+                    print("\n==================================\n")
 
         # bit confusing: we want to make sure to eval and sample on 0th
         # iteration but also after the very last iteration. so we loop for
@@ -1620,11 +1653,12 @@ if __name__ == "__main__":
         lossf = 0.0
         for micro_step in range(grad_accum_steps):
             # fetch a batch
-            x, y, am = train_loader.next_batch()
-            print(x)
-            print(y)
+            x, y = train_loader.next_batch()
+            #print(x)
+            #print(y)
             x, y = x.to(device), y.to(device)
-            am = am.to(device) if am is not None else None
+            #print0("peak memory consumption; DataLoader created: "
+            #       f"{torch.cuda.max_memory_allocated() // 1024 // 1024} MiB")
             if ddp:
                 # we want only the last micro-step to sync grads in a DDP model
                 # the official way to do this is with model.no_sync(), but
@@ -1634,7 +1668,7 @@ if __name__ == "__main__":
                     micro_step == grad_accum_steps - 1)
             # forward pass
             with ctx:
-                _, loss = model(x, y, am, return_logits=False)
+                _, loss = model(x, y, return_logits=False)
                 # we have to scale the loss to account for gradient
                 # accumulation, because the gradients just add on each
                 # successive backward(). addition of gradients corresponds to

@@ -40,10 +40,6 @@ import tiktoken
 from tiktoken.load import load_tiktoken_bpe
 #+end_src
 
-#+RESULTS:
-:results:
-:end:
-
 #+begin_src python
 # Used in Grouped Query Attention (GQA), broadcasts the key and value tensors
 def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -251,10 +247,6 @@ class Block(nn.Module):
 
 #+end_src
 
-#+RESULTS:
-:results:
-:end:
-
 #+begin_src python
 @dataclass
 class LlamaConfig:
@@ -317,10 +309,6 @@ MODEL_DICT: Dict[str, LlamaConfig] = {
 }
 #+end_src
 
-#+RESULTS:
-:results:
-:end:
-
 #+begin_src python
 class LLaMA(nn.Module):
 
@@ -349,7 +337,7 @@ class LLaMA(nn.Module):
         )
         self.register_buffer('freqs_cis', freqs_cis, persistent=False)
 
-    def forward(self, idx, targets=None, attention_mask=None,
+    def forward(self, idx, targets=None,
                 return_logits=True, start_pos=0):
         _, t = idx.size()
         assert t <= self.config.block_size, (
@@ -361,9 +349,6 @@ class LLaMA(nn.Module):
         x = self.transformer.wte(idx)
         freqs_cis = torch.view_as_complex(
             self.freqs_cis[start_pos:start_pos+t])
-        # if attention_mask!=None:
-        #     mask = attention_mask
-        # else:
         mask = torch.triu(
             torch.ones((t, t), device=next(self.parameters()).device,
                        dtype=torch.bool), diagonal=1)
@@ -588,7 +573,7 @@ class LLaMA(nn.Module):
         if zero_stage == 1:
             print0("using ZeroRedundancyOptimizer")
             optimizer = ZeroRedundancyOptimizer(
-                ,**optim_groups[0], optimizer_class=torch.optim.AdamW,
+                **optim_groups[0], optimizer_class=torch.optim.AdamW,
                 lr=learning_rate, betas=betas, fused=use_fused)
             optimizer.add_param_group(optim_groups[1])
         else:
@@ -696,10 +681,6 @@ class LLaMA(nn.Module):
             out_tokens.append(toks)
         return out_tokens
 #+end_src
-
-#+RESULTS:
-:results:
-:end:
 
 #+begin_src python
 # -----------------------------------------------------------------------------
@@ -894,10 +875,6 @@ class Tokenizer:
         yield s[slice_start:]
 #+end_src
 
-#+RESULTS:
-:results:
-:end:
-
 #+begin_src python
 # -----------------------------------------------------------------------------
 # Our own simple Distributed Data Loader
@@ -934,11 +911,14 @@ def _load_data_shard(filename):
     if len(tokens) != ntok:
         print(f"number of tokens({len(tokens)}) read does not match header")
     return tokens
+#+end_src
 
+#+begin_src python
 import json
 from transformers import AutoTokenizer
 class InstructionDataLoader:
-    def __init__(self, filename_pattern, B, T, process_rank, num_processes):
+    def __init__(self, filename_pattern, B, T, process_rank=0,
+                 num_processes=1):
         self.process_rank = process_rank
         self.num_processes = num_processes
         self.B = B
@@ -947,10 +927,16 @@ class InstructionDataLoader:
         # Load instruction data (assuming JSONL format)
         with open("training_data.json", "r", encoding="utf-8") as f:
             self.text_json = json.load(f)
-        self.current_index = process_rank * B
+        #process rank not yet considered; its 0 for now.
+        self.current_batch = process_rank * B
+        self.current_dialogue = 0;
         self.tokenizer = AutoTokenizer.from_pretrained(args.model)
         print(f"len(text_json): {len(self.text_json)}")
+        self.x_tokens = []
+        self.y_tokens = []
         
+    def reset(self):
+        self.current_batch = 0
     
     def format_instruction(self, data_obj):
         """Format instruction according to LLaMA 3.1 chat template"""
@@ -965,64 +951,43 @@ class InstructionDataLoader:
             formatted = (
                 f"<|start_header_id|>{data_obj['role']}<|end_header_id|>\n"
                 f"{data_obj['content']}<|eot_id|>")
-        return formatted
+        #print(data_obj["role"])
+        #print(data_obj["content"])
+        return formatted, data_obj["role"]=="assistant"
     
     def next_batch(self):
-        if self.tokenizer is None:
-            raise ValueError("Tokenizer not set!")
-
-        for entry in self.text_json:
-            role = entry["role"]
-            content = entry["content"]
-            #if role=="user":
-                
-        batch_texts = []
-        for i in range(self.B):
-            idx = (self.current_index + i) % len(self.text_json)
-            formatted = self.format_instruction(self.text_json[idx])
-            batch_texts.append(formatted)
-        
-        # Tokenize with appropriate special tokens
-        encodings = self.tokenizer(
-            batch_texts,
-            padding=True,
-            truncation=True,
-            max_length=self.T,
-            return_tensors="pt",
-            # We already added special tokens in formatting
-            add_special_tokens=False
-        )
-        
-        self.current_index = (
-            self.current_index + self.B * self.num_processes) % (
-                len(self.text_json))
-        
-        # For instruction tuning, we typically mask out the instruction part
-        # and only compute loss on the response
-        input_ids = encodings["input_ids"]
-        attention_mask = encodings["attention_mask"]
-        print(f"input_ids: {input_ids}")
-        print(f"attention_mask: {attention_mask}")
-        # Create labels: -100 for instruction tokens, actual tokens for
-        # response
-        labels = input_ids.clone()
-        for i, text in enumerate(batch_texts):
-            # Find the start of the assistant response
-            assistant_start = text.find(
-                "<|start_header_id|>assistant<|end_header_id|>")
-            if assistant_start == -1:
-                # Tokenize to find the position in token space
-                pre_tokens = self.tokenizer.encode(
-                    text, add_special_tokens=False)
-                # Mask everything before the assistant response
-                labels[i, :len(pre_tokens)] = -100
-        
-        return input_ids, labels, attention_mask
+        tokens_read = len(self.x_tokens) - self.current_batch * self.T * self.B
+        print(f"tokens_read: {tokens_read}")
+        print(f"len(x_tokens): {len(self.x_tokens)}")
+        while tokens_read <= self.B * self.T:
+            self.current_dialogue += 1
+            idx = self.current_dialogue
+            if (idx == len(self.text_json[idx])):
+                self.reset()
+                break
+            formatted, assist = self.format_instruction(
+                self.text_json[idx])
+            tokenized = self.tokenizer.encode(formatted)
+            self.x_tokens.extend(tokenized)
+            if assist==False:
+                self.y_tokens.extend(
+                    [self.tokenizer.pad_token_id] * (len(tokenized)))
+            else:
+                self.y_tokens.extend(tokenized)
+            tokens_read += len(tokenized)
+        current_token=self.current_batch*self.B*self.T
+        end_token = current_token+self.B*self.T
+        if end_token>=len(self.x_tokens):
+            self.x_tokens.extend(
+                [self.tokenizer.pad_token_id] * (end_token+
+                                                 1-len(self.x_tokens)))
+            self.y_tokens.extend(
+                [self.tokenizer.pad_token_id] * (end_token+
+                                                 2-len(self.y_tokens)))
+        self.current_batch += B
+        return (torch.tensor([self.x_tokens[current_token:end_token]]),
+                torch.tensor([self.y_tokens[current_token+1:end_token+1]]))
 #+end_src
-
-#+RESULTS:
-:results:
-:end:
 
 #+begin_src python
 class DistributedShardedDataLoader:
@@ -1086,12 +1051,8 @@ class DistributedShardedDataLoader:
         if (self.current_position + (B * T * self.num_processes + 1) >
             len(self.tokens)):
             self.advance()
-        return x, y, None
+        return x, y
 #+end_src
-
-#+RESULTS:
-:results:
-:end:
 
 #+begin_src python
 # -----------------------------------------------------------------------------
@@ -1272,10 +1233,6 @@ def write_training_history(losses, norms, filename):
     print(f"updated {filename}")
 #+end_src
 
-#+RESULTS:
-:results:
-:end:
-
 #+begin_src python
 # -----------------------------------------------------------------------------
 # int main
@@ -1288,9 +1245,11 @@ def print0(*args, **kwargs):
 
 manual_args = [
     "--batch_size", "1", "--total_batch_size", "64", "--compile", "1",
-    #"--output_dir", "./output", "--write_tensors", "1", "--num_iterations",
-    #"40", "--sample_every", "20",
-    "--tensorcores", "1", "--instruct", "1"]
+    "--output_dir", "./output", "--write_tensors", "1", "--num_iterations",
+    "40", "--sample_every", "20",
+    "--tensorcores", "1",
+    "--instruct", "1"
+]
 if __name__ == "__main__":
     print0(f"Running pytorch {torch.version.__version__}")
 
@@ -1481,6 +1440,9 @@ if __name__ == "__main__":
         model.config.n_layer = args.depth
     print(f"{len(model.transformer.h)} layers")
 
+    print0("peak memory consumption after createing model: "
+           f"{torch.cuda.max_memory_allocated() // 1024 // 1024} MiB")
+
     # PT optimizer doesn't do stochastic rounding, so we
     # really want the model to be in fp32 precision:
     # --dtype should only enable AMP
@@ -1488,12 +1450,16 @@ if __name__ == "__main__":
     #model = model.to(torch.float32)
 
     model = model.to(device)
+    print0("peak memory consumption; model moved to device: "
+           f"{torch.cuda.max_memory_allocated() // 1024 // 1024} MiB")
     model.train()
     if args.compile:
         if hasattr(config, "coordinate_descent_tuning"):
             config.coordinate_descent_tuning = True # suggested by @Chillee
         print0("compiling the model...")
         model = torch.compile(model)
+        print0("peak memory consumption; model compiled: "
+               f"{torch.cuda.max_memory_allocated() // 1024 // 1024} MiB")
 
     # -------------------------------------------------------------------------
     # Our own version of a simple DistributedDataLoader
@@ -1513,16 +1479,18 @@ if __name__ == "__main__":
     elif args.input_val_bin:
         val_loader = DistributedShardedDataLoader(
             args.input_val_bin, B, T, ddp_rank, ddp_world_size)
+    print0("peak memory consumption; DataLoader created: "
+           f"{torch.cuda.max_memory_allocated() // 1024 // 1024} MiB")
+
     # -------------------------------------------------------------------------
     # PyTorch -> C bridge: save some weights and state for C to load later as
     # reference
 
     # do one forward pass to generate ground truth for our C tests
     if master_process and args.write_tensors and (not args.inference_only):
-        x, y, am = train_loader.next_batch()
+        x, y = train_loader.next_batch()
         x, y = x.to(device), y.to(device)
-        am = am.to(device) if am is not None else None
-        logits, loss = model(x, y, am)
+        logits, loss = model(x, y)
         loss.backward()
         # save model params, in bfloat16
         model_size_str = args.model.split("-")[-1]
@@ -1614,22 +1582,16 @@ if 1==1:
             and (step % args.sample_every == 0 or last_step)) \
             and master_process:
             model.eval()
-            prompts: List[str] = [
-        "Clearly, the meaning of life is",
-        "Simply put, the theory of relativity states that",
-        """The repo llm.c on GitHub is""",
-        """Translate English to French:
+            prompts = {
+                "role":"user",
+                "content":"whats current directory"
+            }
 
-        sea otter => loutre de mer
-        peppermint => menthe poivrée
-        plush girafe => girafe peluche
-        cheese =>""",
-            ]
             if args.use_hf:
                 prompt_tokens = [model.tokenizer(x).input_ids for x in prompts]
             else:  # Meta
-                prompt_tokens = [model.tokenizer.encode(
-                    x, bos=True, eos=False) for x in prompts]
+                prompt_tokens, _ = train_loader.format_instruction(prompts)
+                prompt_tokens = [model.tokenizer.encode(prompt_tokens)]
 
             generation_tokens = model.generate(
                 prompt_tokens, max_gen_len=64, temperature=0.6, top_p=0.9,
@@ -1652,6 +1614,8 @@ if 1==1:
 
         # --------------- TRAINING SECTION BEGIN -----------------
         model.train()
+        print0("peak memory consumption; DataLoader created: "
+               f"{torch.cuda.max_memory_allocated() // 1024 // 1024} MiB")
         optimizer.zero_grad(set_to_none=True)
         # if we are trying to overfit a single batch, we reset the loader here
         if args.overfit_single_batch:
@@ -1662,11 +1626,12 @@ if 1==1:
         lossf = 0.0
         for micro_step in range(grad_accum_steps):
             # fetch a batch
-            x, y, am = train_loader.next_batch()
-            print(x)
-            print(y)
+            x, y = train_loader.next_batch()
+            #print(x)
+            #print(y)
             x, y = x.to(device), y.to(device)
-            am = am.to(device) if am is not None else None
+            print0("peak memory consumption; DataLoader created: "
+                   f"{torch.cuda.max_memory_allocated() // 1024 // 1024} MiB")
             if ddp:
                 # we want only the last micro-step to sync grads in a DDP model
                 # the official way to do this is with model.no_sync(), but
@@ -1676,7 +1641,7 @@ if 1==1:
                     micro_step == grad_accum_steps - 1)
             # forward pass
             with ctx:
-                _, loss = model(x, y, am, return_logits=False)
+                _, loss = model(x, y, return_logits=False)
                 # we have to scale the loss to account for gradient
                 # accumulation, because the gradients just add on each
                 # successive backward(). addition of gradients corresponds to
@@ -1747,10 +1712,3 @@ if 1==1:
         destroy_process_group()
 
 #+end_src
-
-#+RESULTS:
-:results:
-Traceback (most recent call last):
-  File "/tmp/pyV4PJVM", line 74, in <module>
-AttributeError: 'InstructionDataLoader' object has no attribute 'reset'
-:end:
