@@ -941,6 +941,7 @@ class InstructionDataLoader:
         print(f"len(text_json): {len(self.text_json)}")
         self.x_tokens = []
         self.y_tokens = []
+        self.assisted = True;
     def reset(self):
         print("resetting data loader")
         self.current_batch = 0
@@ -956,15 +957,20 @@ class InstructionDataLoader:
         else:
             # Simple instruction-response format
             assist = data_obj["role"]=="assistant"
+            formatted = ""
             if assist==False:
-                formatted = (
+                if not self.assisted:
+                    formatted = "<|eot_id|>"
+                formatted += (
                     f"<|start_header_id|>user<|end_header_id|>"
                     f"{data_obj['content']}<|eot_id|><|start_header_id|>"
                     "assistant<|end_header_id|>")
+                self.assisted = False
             else:
                 formatted = (
                     f"{data_obj['content']}<|eot_id|>"
                 )
+                self.assisted = True
         #print(data_obj["role"])
         #print(data_obj["content"])
         return formatted, assist
